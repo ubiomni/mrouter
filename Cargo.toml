@@ -1,0 +1,84 @@
+[package]
+name = "mrouter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+authors = ["MRouter Team"]
+description = "Terminal-based Model Router for AI CLI tools"
+license = "MIT"
+
+[dependencies]
+# TUI 框架
+ratatui = "0.28"
+crossterm = "0.28"
+
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# 数据库
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+
+# HTTP 客户端和服务器
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
+
+# 错误处理
+anyhow = "1.0"
+thiserror = "2.0"
+
+# 其他工具
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+regex = "1.10"
+url = "2.5"
+base64 = "0.22"
+sha2 = "0.10"
+uuid = { version = "1.11", features = ["v4"] }
+shellexpand = "3.1"
+
+# TUI 增强功能
+tui-input = "0.10"
+tui-textarea = "0.6"
+fuzzy-matcher = "0.3"
+unicode-width = "0.1"
+
+# CLI 参数解析
+clap = { version = "4", features = ["derive"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+# 其他
+bytes = "1.5"
+async-stream = "0.3"
+rust_decimal = "1.33"
+rust_decimal_macros = "1.33"
+
+# 剪贴板支持
+arboard = "3.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux 平台静态链接 OpenSSL，避免运行时缺少 libssl.so
+openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 8
+lto = "thin"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
