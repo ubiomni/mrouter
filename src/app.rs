@@ -920,11 +920,10 @@ impl App {
                 self.dialog = None;
                 self.input_mode = InputMode::Normal;
                 return Ok(());
-            } else if title.contains("Configure Auth Header") {
-                // 解析 auth header 字段
+            } else if title.contains("Configure Headers") {
                 let auth_spec = fields[0].value.trim().to_string();
+                let headers_json = fields[1].value.trim().to_string();
 
-                // 更新 Provider 的 auth_header 配置
                 if let Some(provider) = self.providers.get(self.selected_provider) {
                     let mut updated = provider.clone();
 
@@ -934,18 +933,35 @@ impl App {
                         serde_json::Map::new()
                     };
 
+                    // Auth Header
                     if auth_spec.is_empty() || auth_spec == provider.provider_type.default_auth_header_spec() {
-                        // 空值或与默认值相同，移除配置（回退到 provider_type 默认值）
                         config_map.remove("auth_header");
                     } else {
-                        config_map.insert("auth_header".to_string(), serde_json::Value::String(auth_spec.clone()));
+                        config_map.insert("auth_header".to_string(), serde_json::Value::String(auth_spec));
+                    }
+
+                    // Custom Headers
+                    if headers_json.is_empty() || headers_json == "{}" {
+                        config_map.remove("custom_headers");
+                    } else {
+                        match serde_json::from_str::<serde_json::Value>(&headers_json) {
+                            Ok(val) if val.is_object() => {
+                                config_map.insert("custom_headers".to_string(), val);
+                            }
+                            _ => {
+                                self.show_notification(
+                                    r#"Invalid JSON. Example: {"User-Agent": "my-agent/1.0"}"#.to_string(),
+                                    NotificationLevel::Error
+                                );
+                                return Ok(());
+                            }
+                        }
                     }
 
                     updated.config = serde_json::Value::Object(config_map);
-
                     ProviderDao::update(&self.db, &updated)?;
                     self.show_notification(
-                        format!("Updated auth header for: {}", updated.name),
+                        format!("Updated headers for: {}", updated.name),
                         NotificationLevel::Success
                     );
                     self.refresh().await?;
@@ -2147,26 +2163,34 @@ impl App {
         }
     }
 
-    pub fn handle_configure_auth_header(&mut self) {
+    pub fn handle_configure_headers(&mut self) {
         if self.current_tab == Tab::Providers {
             if let Some(provider) = self.providers.get(self.selected_provider) {
-                // 读取现有配置值，没有则用 provider_type 默认值
-                let current_spec = provider.config.get("auth_header")
+                let current_auth = provider.config.get("auth_header")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| provider.provider_type.default_auth_header_spec().to_string());
 
+                let current_custom = provider.config.get("custom_headers")
+                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                    .unwrap_or_default();
+
                 let mut fields = vec![
                     InputField::new(
                         "Auth Header",
-                        "Format: header-name or header-name:prefix (e.g., x-api-key, authorization:Bearer)"
+                        "header-name or header-name:prefix (e.g., x-api-key, authorization:Bearer)"
+                    ),
+                    InputField::new(
+                        "Custom Headers (JSON)",
+                        r#"{"User-Agent": "claude-cli/2.1.72", "X-Custom": "value"}"#
                     ),
                 ];
 
-                fields[0].set_value(current_spec);
+                fields[0].set_value(current_auth);
+                fields[1].set_value(current_custom);
 
                 self.dialog = Some(DialogKind::Input {
-                    title: format!("Configure Auth Header: {}", provider.name),
+                    title: format!("Configure Headers: {}", provider.name),
                     fields,
                     focused_field: 0,
                 });

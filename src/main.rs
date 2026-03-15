@@ -242,8 +242,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                 tui::event::Action::ConfigureModelMappings => {
                     app.handle_configure_model_mappings();
                 }
-                tui::event::Action::ConfigureAuthHeader => {
-                    app.handle_configure_auth_header();
+                tui::event::Action::ConfigureHeaders => {
+                    app.handle_configure_headers();
                 }
                 tui::event::Action::InputFetchModels => {
                     app.handle_fetch_models().await?;

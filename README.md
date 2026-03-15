@@ -1,8 +1,10 @@
 # MRouter - LLM Gateway Router
 
+> **One Endpoint, Every Model. Route, Monitor, and Failover — All From Your Terminal.**
+
 [English](README.md) | [中文](README_zh.md)
 
-A powerful terminal-based LLM Gateway Router for managing multiple AI providers, Agent and CLI tools.
+One endpoint for every AI provider — smart routing, auto failover, zero-config CLI sync. Built as a terminal-native LLM gateway.
 
 ## Why MRouter?
 
@@ -100,6 +102,7 @@ mrouter proxy status
 - `d` - Delete provider
 - `v` - View supported models
 - `p` - Configure pricing
+- `o` - Configure headers (Auth Header + Custom Headers)
 - `m` - Configure model mappings
 - `r` - Reset circuit breaker
 - `s` - Manage sync settings

@@ -1,8 +1,10 @@
 # MRouter - LLM 网关路由器
 
+> **One Endpoint, Every Model. Route, Monitor, and Failover — All From Your Terminal.**
+
 [English](README.md) | [中文](README_zh.md)
 
-Mrouter(Model Router)一个强大的终端 LLM 网关路由器，用于管理多个 AI 提供商, Agent 和 CLI 工具。
+一个端点接入所有大模型 — 智能路由、自动容灾、CLI 工具开箱即用。终端原生的 LLM 网关。
 
 ## 为什么选择 MRouter？
 
@@ -100,6 +102,7 @@ mrouter proxy status
 - `d` - 删除提供商
 - `v` - 查看支持的模型
 - `p` - 配置定价
+- `o` - 配置请求头（Auth Header + 自定义请求头）
 - `m` - 配置模型映射
 - `r` - 重置熔断器
 - `s` - 管理同步设置

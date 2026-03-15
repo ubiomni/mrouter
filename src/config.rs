@@ -108,6 +108,10 @@ pub struct ProxyConfig {
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
 
+    /// 全局自定义请求头（转发到上游时附加，Provider 级别的 custom_headers 优先级更高）
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+
     /// 流式响应超时配置
     #[serde(default)]
     pub streaming_timeout: StreamingTimeoutConfig,
@@ -285,6 +289,7 @@ impl Default for ProxyConfig {
             port: default_proxy_port(),
             bind: default_bind_addr(),
             timeout_secs: default_timeout(),
+            headers: std::collections::HashMap::new(),
             streaming_timeout: StreamingTimeoutConfig::default(),
         }
     }
@@ -328,12 +333,12 @@ impl AppConfig {
             Ok(config)
         } else {
             let config = AppConfig::default();
-            config.save()?;
+            config.save_default_template()?;
             Ok(config)
         }
     }
 
-    /// 保存配置到文件
+    /// 保存配置到文件（保留已有注释，更新变化的值并移除其行内注释）
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
 
@@ -341,9 +346,177 @@ impl AppConfig {
             fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)?;
-        fs::write(&path, content)?;
+        let new_toml = toml::to_string_pretty(self)?;
 
+        if path.exists() {
+            let existing_content = fs::read_to_string(&path)?;
+            match (
+                existing_content.parse::<toml_edit::DocumentMut>(),
+                new_toml.parse::<toml_edit::DocumentMut>(),
+            ) {
+                (Ok(mut doc), Ok(new_doc)) => {
+                    Self::merge_tables(doc.as_table_mut(), new_doc.as_table());
+                    fs::write(&path, doc.to_string())?;
+                }
+                _ => {
+                    // 解析失败则直接覆盖
+                    fs::write(&path, new_toml)?;
+                }
+            }
+        } else {
+            fs::write(&path, new_toml)?;
+        }
+
+        Ok(())
+    }
+
+    /// 递归合并新配置到已有文档，保留未修改项的注释
+    fn merge_tables(existing: &mut toml_edit::Table, new_values: &toml_edit::Table) {
+        for (key, new_item) in new_values.iter() {
+            match new_item {
+                toml_edit::Item::Table(new_sub) => {
+                    if let Some(toml_edit::Item::Table(existing_sub)) = existing.get_mut(key) {
+                        Self::merge_tables(existing_sub, new_sub);
+                    } else {
+                        existing.insert(key, new_item.clone());
+                    }
+                }
+                toml_edit::Item::Value(new_val) => {
+                    let changed = existing
+                        .get(key)
+                        .and_then(|item| item.as_value())
+                        .map(|old_val| !Self::values_equal(old_val, new_val))
+                        .unwrap_or(true);
+
+                    if changed {
+                        // 值变了：更新值，行内注释自然被移除（new_val 无注释）
+                        existing.insert(key, toml_edit::Item::Value(new_val.clone()));
+                    }
+                    // 值未变：保留原样（包括行内注释）
+                }
+                _ => {
+                    existing.insert(key, new_item.clone());
+                }
+            }
+        }
+    }
+
+    /// 比较两个 toml_edit::Value 的实际内容（忽略注释/空白装饰）
+    fn values_equal(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+        let mut a = a.clone();
+        let mut b = b.clone();
+        a.decor_mut().set_prefix("");
+        a.decor_mut().set_suffix("");
+        b.decor_mut().set_prefix("");
+        b.decor_mut().set_suffix("");
+        a.to_string().trim() == b.to_string().trim()
+    }
+
+    /// 首次创建时写入带注释的完整配置模板
+    fn save_default_template(&self) -> Result<()> {
+        let path = Self::config_path()?;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let template = r#"# ============================================================
+#  MRouter Configuration
+#  https://github.com/ubiomni/mrouter
+# ============================================================
+
+# ---- General Settings ----
+[general]
+default_app = "claude-code"          # Default CLI tool: claude-code, codex, gemini-cli, opencode, openclaw
+auto_sync = true                     # Auto-sync config to CLI tools when switching providers
+
+# ---- Logging ----
+[log]
+level = "info"                       # Log level: trace, debug, info, warn, error
+file = "~/.mrouter/logs/mrouter.log" # Log file path (remove to disable file logging)
+stderr = false                       # Also output to stderr
+max_size_mb = 10                     # Max log file size (MB), auto-rotates when exceeded
+max_backups = 5                      # Number of rotated log files to keep
+
+# ---- Database ----
+[database]
+path = "~/.mrouter/db/mrouter.db"   # SQLite database path
+wal_mode = true                      # Enable WAL mode (recommended)
+auto_cleanup = true                  # Auto-cleanup old request logs on proxy start
+max_request_logs = 1000000           # Max request log entries before cleanup
+archive_dir = "~/.mrouter/archives"  # Archive directory for cleaned-up logs
+
+# ---- Proxy Server ----
+[proxy]
+port = 4444                          # Proxy listen port
+bind = "127.0.0.1"                   # Bind address ("0.0.0.0" to allow external access)
+timeout_secs = 30                    # HTTP connection timeout (seconds)
+
+# Global custom headers (applied to ALL upstream provider requests)
+#
+# Header priority (highest wins):
+#   1. Provider custom_headers (TUI 'o' key, per-provider)
+#   2. [proxy.headers] below (global, this file)
+#   3. Client original headers (passthrough)
+#
+# [proxy.headers]
+# User-Agent = "claude-cli/2.1.72 (external, cli)"
+# X-Custom-Header = "some-value"
+
+# Streaming response timeouts
+[proxy.streaming_timeout]
+first_byte_secs = 10                 # Max wait for first data chunk
+idle_secs = 30                       # Max gap between data chunks
+total_secs = 300                     # Max total streaming duration (5 min)
+
+# ---- Health Check ----
+[health_check]
+enabled = false                      # Enable periodic health checks
+interval_secs = 300                  # Check interval (seconds), default 5 min
+
+# ---- Circuit Breaker ----
+[circuit_breaker]
+failure_threshold = 5                # Consecutive failures to trip the breaker (Open)
+success_threshold = 2                # Consecutive successes in Half-Open to recover (Closed)
+timeout_secs = 60                    # How long Open state lasts before Half-Open (seconds)
+half_open_timeout_secs = 30          # Half-Open state timeout (seconds)
+
+# ---- Model Fallback ----
+#
+# When enabled, if the requested model fails on all providers,
+# mrouter will retry with fallback models in order.
+#
+[model_fallback]
+enabled = false                      # Enable smart model fallback/degradation
+
+# Fallback chains: requested model -> list of fallback models to try
+[model_fallback.fallback_chains]
+"claude-opus-4" = ["claude-sonnet-4", "claude-haiku-4"]
+"claude-opus-4-20250514" = ["claude-sonnet-4-20250514", "claude-haiku-4-20250514"]
+"claude-sonnet-4" = ["claude-haiku-4"]
+"claude-sonnet-4-20250514" = ["claude-haiku-4-20250514"]
+"gpt-4" = ["gpt-4-turbo", "gpt-3.5-turbo"]
+"gpt-4-turbo" = ["gpt-3.5-turbo"]
+"gpt-4o" = ["gpt-4-turbo", "gpt-3.5-turbo"]
+"gemini-pro" = ["gemini-pro-vision"]
+"gemini-1.5-pro" = ["gemini-1.0-pro"]
+
+# ============================================================
+#  Provider-Level Settings (configured via TUI, not this file)
+# ============================================================
+#
+# Select a provider in TUI and press the shortcut key:
+#
+#   'o' - Auth Header & Custom Headers (JSON)
+#         Per-provider headers take highest priority, override [proxy.headers]
+#   'e' - Edit provider (name, base_url, api_key, etc.)
+#   'm' - Model Mappings (JSON), e.g. {"claude-sonnet-4-20250514": "claude-sonnet-4"}
+#   'p' - Pricing configuration
+#   'v' - View supported models
+#
+"#;
+
+        fs::write(&path, template)?;
         Ok(())
     }
 
@@ -370,5 +543,55 @@ impl AppConfig {
                 PathBuf::from(path_str)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_save_preserves_comments_removes_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // 写入带注释的模板
+        let template = r#"[proxy]
+port = 4444                          # Proxy listen port
+bind = "127.0.0.1"                   # Bind address
+
+[log]
+level = "info"                       # Log level: trace, debug, info, warn, error
+"#;
+        fs::write(&path, template).unwrap();
+
+        // 模拟 save(): port 改变，其他不变
+        let existing_content = fs::read_to_string(&path).unwrap();
+        let mut doc: toml_edit::DocumentMut = existing_content.parse().unwrap();
+
+        // 构造新配置 (port=5555, 其他不变)
+        let new_toml = r#"[proxy]
+port = 5555
+bind = "127.0.0.1"
+
+[log]
+level = "info"
+"#;
+        let new_doc: toml_edit::DocumentMut = new_toml.parse().unwrap();
+
+        AppConfig::merge_tables(doc.as_table_mut(), new_doc.as_table());
+        let result = doc.to_string();
+
+        println!("=== Result ===\n{}", result);
+
+        // port 值变了 -> 注释应被去掉
+        assert!(result.contains("port = 5555"));
+        assert!(!result.contains("Proxy listen port"));
+
+        // bind 值未变 -> 注释应保留
+        assert!(result.contains("# Bind address"));
+
+        // log.level 未变 -> 注释应保留
+        assert!(result.contains("# Log level"));
     }
 }

@@ -40,7 +40,7 @@ pub enum Action {
     ViewSupportedModels,  // 在 Provider 详情页查看支持的模型列表
     ConfigurePricing,     // 配置 Provider 定价
     ConfigureModelMappings, // 配置模型名称映射
-    ConfigureAuthHeader,  // 配置鉴权 Header
+    ConfigureHeaders,     // 配置 Auth Header + Custom Headers
     MultiSelectToggle,
     MultiSelectSubmit,
     ProxyStart,
@@ -361,7 +361,7 @@ fn handle_normal_mode(key: event::KeyEvent, app: &App) -> Result<Option<Action>>
             Ok(Some(Action::ConfigureModelMappings))
         }
         (KeyCode::Char('o'), _) if app.current_tab == Tab::Providers => {
-            Ok(Some(Action::ConfigureAuthHeader))
+            Ok(Some(Action::ConfigureHeaders))
         }
         (KeyCode::Char('r'), _) => {
             if app.current_tab == Tab::Providers {

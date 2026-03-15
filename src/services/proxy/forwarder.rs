@@ -79,7 +79,7 @@ impl RequestForwarder {
 
                 tracing::info!("Trying provider: {} (priority: {})", provider.name, provider.priority);
 
-                match self.forward_single(provider, path, query, &modified_body, headers, method).await {
+                match self.forward_single(provider, path, query, &modified_body, headers, method, state).await {
                     Ok(response) => {
                         tracing::info!("Request succeeded with provider: {}", provider.name);
                         circuit_breaker.record_success().await;
@@ -105,7 +105,7 @@ impl RequestForwarder {
 
                 tracing::info!("Retrying provider after CB reset: {} (priority: {})", provider.name, provider.priority);
 
-                match self.forward_single(provider, path, query, &modified_body, headers, method).await {
+                match self.forward_single(provider, path, query, &modified_body, headers, method, state).await {
                     Ok(response) => {
                         circuit_breaker.record_success().await;
                         return Ok(ForwardResult {
@@ -139,6 +139,7 @@ impl RequestForwarder {
         body_bytes: &bytes::Bytes,
         headers: &HeaderMap,
         method: &axum::http::Method,
+        state: &ProxyState,
     ) -> Result<reqwest::Response, ProxyError> {
         let adapter = get_adapter(provider);
         let base_url = adapter.extract_base_url(provider)?;
@@ -158,12 +159,14 @@ impl RequestForwarder {
             &target_url,
         );
 
-        // Copy headers, skipping auth, host, adapter-managed, and headers that will be overridden by custom_headers
+        // Copy headers, skipping auth, host, adapter-managed, and headers overridden by global/provider headers
         let auth_info = adapter.extract_auth(provider);
         let auth_header_name = auth_info.as_ref().map(|a| a.header_name().to_string());
+        let global_hdrs = &state.config.proxy.headers;
         let custom_hdrs = provider.custom_headers();
-        // Build lowercase key set for case-insensitive comparison
-        let custom_keys: std::collections::HashSet<String> = custom_hdrs.keys()
+        // Build lowercase key set for case-insensitive comparison (global + provider)
+        let override_keys: std::collections::HashSet<String> = global_hdrs.keys()
+            .chain(custom_hdrs.keys())
             .map(|k| k.to_lowercase())
             .collect();
         let managed = adapter.managed_headers();
@@ -172,7 +175,7 @@ impl RequestForwarder {
             if key == "host" || key == "accept-encoding"
                 || AUTH_HEADER_SKIP_SET.iter().any(|&h| key == h)
                 || auth_header_name.as_deref().map_or(false, |n| key.as_str() == n)
-                || custom_keys.contains(key.as_str())
+                || override_keys.contains(key.as_str())
                 || managed.iter().any(|&h| key == h)
             {
                 continue;
@@ -182,7 +185,12 @@ impl RequestForwarder {
 
         request_builder = request_builder.header("accept-encoding", "identity");
 
-        // Apply provider custom headers (overrides client headers with same name)
+        // Apply global headers from config.toml [proxy.headers]
+        for (key, value) in global_hdrs {
+            request_builder = request_builder.header(key.as_str(), value.as_str());
+        }
+
+        // Apply provider custom headers (overrides global headers with same name)
         for (key, value) in &custom_hdrs {
             request_builder = request_builder.header(key.as_str(), value.as_str());
         }
@@ -195,8 +203,8 @@ impl RequestForwarder {
             request_builder = adapter.add_auth_headers(request_builder, &auth);
         }
 
-        tracing::debug!("[Proxy] Sending request - URL: {}, Method: {}, Body size: {} bytes",
-            target_url, method, final_body.len());
+        tracing::info!("[Proxy] >>> {} {} | Body: {} bytes", method, target_url, final_body.len());
+        tracing::debug!("[Proxy] >>> Request body:\n{}", String::from_utf8_lossy(&final_body));
 
         let response = request_builder
             .body(final_body.clone())
@@ -210,7 +218,7 @@ impl RequestForwarder {
             })?;
 
         let status = response.status();
-        tracing::debug!("[Proxy] <<< Response status: {}", status);
+        tracing::info!("[Proxy] <<< Response: {} from provider '{}'", status, provider.name);
 
         if !status.is_success() {
             tracing::warn!("[Proxy] Non-success status: {} from provider: {}", status, provider.name);
@@ -344,8 +352,8 @@ impl RequestForwarder {
             tracing::error!("[Proxy] Error type: Decode error");
         }
 
-        tracing::debug!("[Proxy] Request body (first 500 chars): {}",
-            String::from_utf8_lossy(&body[..body.len().min(500)]));
+        tracing::debug!("[Proxy] Request body: {}",
+            String::from_utf8_lossy(body));
         tracing::debug!("[Proxy] Provider details: base_url={}, provider_type={:?}",
             provider.base_url, provider.provider_type);
     }

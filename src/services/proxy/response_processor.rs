@@ -46,7 +46,7 @@ fn handle_streaming(
     provider: &Provider,
     state: &ProxyState,
 ) -> Result<Response, ProxyError> {
-    tracing::debug!("[Proxy] Detected streaming response, forwarding with token extraction");
+    tracing::info!("[Proxy] Detected streaming response, forwarding with token extraction");
 
     let mut response_builder = Response::builder()
         .status(status.as_u16());
@@ -85,9 +85,11 @@ fn handle_streaming(
         let mut last_chunk_time = Instant::now();
         let mut ttft_ms: Option<u64> = None;
 
-        // SSE event buffer for token extraction
+        // SSE event buffer for token extraction and debug logging
         let mut sse_buffer = String::new();
         let mut collected_events: Vec<serde_json::Value> = Vec::new();
+        // Raw stream content for debug logging (collected regardless of enable_stats)
+        let mut raw_stream_log = String::new();
 
         tokio::pin!(byte_stream);
 
@@ -123,10 +125,13 @@ fn handle_streaming(
                     }
                     last_chunk_time = Instant::now();
 
+                    // Collect raw stream content for debug logging
+                    let chunk_str = String::from_utf8_lossy(&bytes);
+                    raw_stream_log.push_str(&chunk_str);
+
                     // Parse SSE events for token collection (if stats enabled)
                     if enable_stats {
-                        // Append to buffer and parse complete events
-                        sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        sse_buffer.push_str(&chunk_str);
                         parse_sse_events_from_buffer(&mut sse_buffer, &mut collected_events);
                     }
 
@@ -135,7 +140,7 @@ fn handle_streaming(
                 Ok(Some(Err(e))) => {
                     let err_str = e.to_string();
                     if err_str.contains("IncompleteMessage") {
-                        tracing::debug!("[Proxy] Stream ended (IncompleteMessage is normal for SSE)");
+                        tracing::info!("[Proxy] Stream ended (IncompleteMessage is normal for SSE)");
                         break;
                     } else {
                         tracing::warn!("[Proxy] Stream error: {}", err_str);
@@ -196,6 +201,10 @@ fn handle_streaming(
         } else if enable_stats {
             tracing::warn!("[Proxy] No SSE events collected for token extraction");
         }
+
+        // Log full streaming response content at debug level
+        tracing::debug!("[Proxy] <<< Streaming response ({} bytes):\n{}",
+            raw_stream_log.len(), raw_stream_log);
     };
 
     let body = Body::from_stream(stream);
@@ -213,7 +222,7 @@ fn handle_non_streaming_passthrough(
     status: reqwest::StatusCode,
     response_headers: reqwest::header::HeaderMap,
 ) -> Result<Response, ProxyError> {
-    tracing::debug!("[Proxy] Processing non-streaming response (pass-through, stats disabled)");
+    tracing::info!("[Proxy] Processing non-streaming response (pass-through, stats disabled)");
     use futures::StreamExt;
 
     let stream = response
@@ -244,7 +253,7 @@ async fn handle_non_streaming_buffered(
     provider: &Provider,
     state: &ProxyState,
 ) -> Result<Response, ProxyError> {
-    tracing::debug!("[Proxy] Processing non-streaming response (buffered, stats enabled)");
+    tracing::info!("[Proxy] Processing non-streaming response (buffered, stats enabled)");
 
     let body_bytes = response.bytes().await
         .map_err(|e| {
@@ -252,11 +261,12 @@ async fn handle_non_streaming_buffered(
             ProxyError::ResponseError(e.to_string())
         })?;
 
-    tracing::debug!("[Proxy] Response body size: {} bytes", body_bytes.len());
+    tracing::info!("[Proxy] Response body: {} bytes", body_bytes.len());
+    tracing::debug!("[Proxy] <<< Response body:\n{}", String::from_utf8_lossy(&body_bytes));
 
     // Parse and extract token usage
     let usage_info = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        tracing::debug!("[Proxy] Response body parsed as JSON");
+        tracing::info!("[Proxy] Response body parsed as JSON");
 
         // Check for error in response
         if let Some(error) = json.get("error") {
@@ -276,7 +286,7 @@ async fn handle_non_streaming_buffered(
 
         extract_token_usage_with_type(&json, &provider.provider_type)
     } else {
-        tracing::debug!("[Proxy] Response body is not JSON");
+        tracing::info!("[Proxy] Response body is not JSON");
         None
     };
 
