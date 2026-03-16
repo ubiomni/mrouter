@@ -100,7 +100,67 @@ pub enum NotificationLevel {
     Info,
 }
 
+pub struct SettingsItem {
+    pub key: &'static str,     // "" = category header
+    pub label: &'static str,
+    pub value: String,
+}
+
 impl App {
+    pub fn settings_items(&self) -> Vec<SettingsItem> {
+        vec![
+            // === Logging ===
+            SettingsItem { key: "", label: "", value: "=== Logging ===".into() },
+            SettingsItem { key: "log.level", label: "Log Level", value: self.config.log.level.clone() },
+            SettingsItem { key: "log.file", label: "Log File", value: self.config.log.file.clone().unwrap_or_else(|| "(none)".into()) },
+            SettingsItem { key: "log.max_size_mb", label: "Log Max Size (MB)", value: self.config.log.max_size_mb.to_string() },
+            SettingsItem { key: "log.max_backups", label: "Log Max Backups", value: self.config.log.max_backups.to_string() },
+
+            // === Database ===
+            SettingsItem { key: "", label: "", value: "=== Database ===".into() },
+            SettingsItem { key: "db.path", label: "Database Path", value: self.config.database.path.clone() },
+            SettingsItem { key: "db.wal_mode", label: "WAL Mode", value: if self.config.database.wal_mode { "Enabled" } else { "Disabled" }.into() },
+            SettingsItem { key: "db.max_request_logs", label: "Max Request Logs", value: self.config.database.max_request_logs.to_string() },
+            SettingsItem { key: "db.archive_dir", label: "Archive Directory", value: self.config.database.archive_dir.clone() },
+            SettingsItem { key: "db.auto_cleanup", label: "Auto Cleanup", value: if self.config.database.auto_cleanup { "Enabled" } else { "Disabled" }.into() },
+
+            // === Proxy ===
+            SettingsItem { key: "", label: "", value: "=== Proxy ===".into() },
+            SettingsItem { key: "proxy.port", label: "Proxy Port", value: self.config.proxy.port.to_string() },
+            SettingsItem { key: "proxy.bind", label: "Proxy Bind", value: self.config.proxy.bind.clone() },
+            SettingsItem { key: "proxy.timeout", label: "Request Timeout", value: format!("{}s", self.config.proxy.timeout_secs) },
+            SettingsItem { key: "proxy.upstream_proxy", label: "Upstream Proxy", value: self.config.proxy.upstream_proxy.clone().unwrap_or_else(|| "(system env)".into()) },
+
+            // === Streaming Timeout ===
+            SettingsItem { key: "", label: "", value: "=== Streaming Timeout ===".into() },
+            SettingsItem { key: "streaming.first_byte", label: "First Byte Timeout", value: format!("{}s", self.config.proxy.streaming_timeout.first_byte_secs) },
+            SettingsItem { key: "streaming.idle", label: "Idle Timeout", value: format!("{}s", self.config.proxy.streaming_timeout.idle_secs) },
+            SettingsItem { key: "streaming.total", label: "Total Timeout", value: format!("{}s", self.config.proxy.streaming_timeout.total_secs) },
+
+            // === Health Check ===
+            SettingsItem { key: "", label: "", value: "=== Health Check ===".into() },
+            SettingsItem { key: "health.interval", label: "Health Interval", value: format!("{}s", self.config.health_check.interval_secs) },
+
+            // === Circuit Breaker ===
+            SettingsItem { key: "", label: "", value: "=== Circuit Breaker ===".into() },
+            SettingsItem { key: "cb.fail_threshold", label: "CB Fail Threshold", value: self.config.circuit_breaker.failure_threshold.to_string() },
+            SettingsItem { key: "cb.success_threshold", label: "CB Success Threshold", value: self.config.circuit_breaker.success_threshold.to_string() },
+            SettingsItem { key: "cb.timeout", label: "CB Timeout", value: format!("{}s", self.config.circuit_breaker.timeout_secs) },
+            SettingsItem { key: "cb.half_open_timeout", label: "CB Half-Open Timeout", value: format!("{}s", self.config.circuit_breaker.half_open_timeout_secs) },
+
+            // === Model Fallback ===
+            SettingsItem { key: "", label: "", value: "=== Model Fallback ===".into() },
+            SettingsItem { key: "fallback.enabled", label: "Model Fallback", value: if self.config.model_fallback.enabled { "Enabled" } else { "Disabled" }.into() },
+        ]
+    }
+
+    fn settings_current_key(&self) -> &'static str {
+        self.settings_items()
+            .get(self.settings_selected)
+            .map(|item| item.key)
+            .unwrap_or("")
+    }
+
     pub async fn new(db: Database, config: AppConfig) -> Result<Self> {
         // 获取所有 Provider（不按 CLI Tool 过滤）
         let mut all_providers = Vec::new();
@@ -136,7 +196,7 @@ impl App {
             proxy_port,
             proxy_request_count: 0,
             health_statuses: Vec::new(),
-            settings_selected: 0,
+            settings_selected: 1,  // skip first category header
             input_mode: InputMode::Normal,
             notification: None,
             dialog: None,
@@ -421,30 +481,36 @@ impl App {
                 }
                 _ => {}
             },
-            Tab::Settings => match dir {
-                Direction::Up => {
-                    if self.settings_selected > 0 {
-                        self.settings_selected -= 1;
-                        // 跳过分类标题行 (0, 5, 11, 15, 19, 21, 26)
-                        let category_headers = vec![0, 5, 11, 15, 19, 21, 26];
-                        while category_headers.contains(&self.settings_selected) && self.settings_selected > 0 {
+            Tab::Settings => {
+                let items = self.settings_items();
+                let max = items.len().saturating_sub(1);
+                match dir {
+                    Direction::Up => {
+                        if self.settings_selected > 0 {
                             self.settings_selected -= 1;
+                            while self.settings_selected > 0 && items[self.settings_selected].key.is_empty() {
+                                self.settings_selected -= 1;
+                            }
+                            // If landed on header at 0, move back down to first real item
+                            if items[self.settings_selected].key.is_empty() {
+                                self.settings_selected += 1;
+                                while self.settings_selected <= max && items[self.settings_selected].key.is_empty() {
+                                    self.settings_selected += 1;
+                                }
+                            }
                         }
                     }
-                }
-                Direction::Down => {
-                    // 总共 28 项 (包括 7 个分类标题)
-                    if self.settings_selected < 27 {
-                        self.settings_selected += 1;
-                        // 跳过分类标题行
-                        let category_headers = vec![0, 5, 11, 15, 19, 21, 26];
-                        while category_headers.contains(&self.settings_selected) && self.settings_selected < 27 {
+                    Direction::Down => {
+                        if self.settings_selected < max {
                             self.settings_selected += 1;
+                            while self.settings_selected < max && items[self.settings_selected].key.is_empty() {
+                                self.settings_selected += 1;
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Tab::RequestLogs => match dir {
                 Direction::Up => {
                     self.previous_log();
@@ -1331,39 +1397,39 @@ impl App {
 
     /// 打开 Settings 编辑对话框
     fn open_settings_edit_dialog(&mut self) {
-        // 映射：索引 -> (标题, 字段)
-        // 分类标题索引: 0, 3, 9, 13, 17, 19, 24
-        let (title, fields) = match self.settings_selected {
+        let key = self.settings_current_key();
+        if key.is_empty() { return; }
+
+        let (title, fields) = match key {
             // === Logging ===
-            1 => ("Log Level", vec![{
+            "log.level" => ("Log Level", vec![{
                 let mut f = InputField::new("Level", "info");
                 f.set_value(self.config.log.level.clone());
                 f
             }]),
-            2 => ("Log File", vec![{
+            "log.file" => ("Log File", vec![{
                 let mut f = InputField::new("Path", "~/.mrouter/logs/mrouter.log");
                 f.set_value(self.config.log.file.clone().unwrap_or_default());
                 f
             }]),
-            3 => ("Log Max Size (MB)", vec![{
+            "log.max_size_mb" => ("Log Max Size (MB)", vec![{
                 let mut f = InputField::new("Size", "10");
                 f.set_value(self.config.log.max_size_mb.to_string());
                 f
             }]),
-            4 => ("Log Max Backups", vec![{
+            "log.max_backups" => ("Log Max Backups", vec![{
                 let mut f = InputField::new("Count", "5");
                 f.set_value(self.config.log.max_backups.to_string());
                 f
             }]),
 
             // === Database ===
-            6 => ("Database Path", vec![{
+            "db.path" => ("Database Path", vec![{
                 let mut f = InputField::new("Path", "~/.mrouter/db/mrouter.db");
                 f.set_value(self.config.database.path.clone());
                 f
             }]),
-            7 => {
-                // WAL Mode toggle
+            "db.wal_mode" => {
                 self.config.database.wal_mode = !self.config.database.wal_mode;
                 if let Err(e) = self.config.save() {
                     self.show_notification(format!("Failed to save: {}", e), NotificationLevel::Error);
@@ -1373,18 +1439,17 @@ impl App {
                 }
                 return;
             }
-            8 => ("Max Request Logs", vec![{
+            "db.max_request_logs" => ("Max Request Logs", vec![{
                 let mut f = InputField::new("Count", "1000000");
                 f.set_value(self.config.database.max_request_logs.to_string());
                 f
             }]),
-            9 => ("Archive Directory", vec![{
+            "db.archive_dir" => ("Archive Directory", vec![{
                 let mut f = InputField::new("Path", "~/.mrouter/archives");
                 f.set_value(self.config.database.archive_dir.clone());
                 f
             }]),
-            10 => {
-                // Auto Cleanup toggle
+            "db.auto_cleanup" => {
                 self.config.database.auto_cleanup = !self.config.database.auto_cleanup;
                 if let Err(e) = self.config.save() {
                     self.show_notification(format!("Failed to save: {}", e), NotificationLevel::Error);
@@ -1396,71 +1461,75 @@ impl App {
             }
 
             // === Proxy ===
-            12 => ("Proxy Port", vec![{
+            "proxy.port" => ("Proxy Port", vec![{
                 let mut f = InputField::new("Port", "4444");
                 f.set_value(self.config.proxy.port.to_string());
                 f
             }]),
-            13 => ("Proxy Bind", vec![{
+            "proxy.bind" => ("Proxy Bind", vec![{
                 let mut f = InputField::new("Address", "127.0.0.1");
                 f.set_value(self.config.proxy.bind.clone());
                 f
             }]),
-            14 => ("Request Timeout", vec![{
+            "proxy.timeout" => ("Request Timeout", vec![{
                 let mut f = InputField::new("Seconds", "30");
                 f.set_value(self.config.proxy.timeout_secs.to_string());
                 f
             }]),
+            "proxy.upstream_proxy" => ("Upstream Proxy", vec![{
+                let mut f = InputField::new("Proxy URL", "socks5://127.0.0.1:7890 or http://proxy:8080 or none");
+                f.set_value(self.config.proxy.upstream_proxy.clone().unwrap_or_default());
+                f
+            }]),
 
             // === Streaming Timeout ===
-            16 => ("First Byte Timeout", vec![{
+            "streaming.first_byte" => ("First Byte Timeout", vec![{
                 let mut f = InputField::new("Seconds", "10");
                 f.set_value(self.config.proxy.streaming_timeout.first_byte_secs.to_string());
                 f
             }]),
-            17 => ("Idle Timeout", vec![{
+            "streaming.idle" => ("Idle Timeout", vec![{
                 let mut f = InputField::new("Seconds", "30");
                 f.set_value(self.config.proxy.streaming_timeout.idle_secs.to_string());
                 f
             }]),
-            18 => ("Total Timeout", vec![{
+            "streaming.total" => ("Total Timeout", vec![{
                 let mut f = InputField::new("Seconds", "300");
                 f.set_value(self.config.proxy.streaming_timeout.total_secs.to_string());
                 f
             }]),
 
             // === Health Check ===
-            20 => ("Health Check Interval", vec![{
+            "health.interval" => ("Health Check Interval", vec![{
                 let mut f = InputField::new("Seconds", "300");
                 f.set_value(self.config.health_check.interval_secs.to_string());
                 f
             }]),
 
             // === Circuit Breaker ===
-            22 => ("CB Failure Threshold", vec![{
+            "cb.fail_threshold" => ("CB Failure Threshold", vec![{
                 let mut f = InputField::new("Count", "5");
                 f.set_value(self.config.circuit_breaker.failure_threshold.to_string());
                 f
             }]),
-            23 => ("CB Success Threshold", vec![{
+            "cb.success_threshold" => ("CB Success Threshold", vec![{
                 let mut f = InputField::new("Count", "2");
                 f.set_value(self.config.circuit_breaker.success_threshold.to_string());
                 f
             }]),
-            24 => ("CB Timeout", vec![{
+            "cb.timeout" => ("CB Timeout", vec![{
                 let mut f = InputField::new("Seconds", "60");
                 f.set_value(self.config.circuit_breaker.timeout_secs.to_string());
                 f
             }]),
-            25 => ("CB Half-Open Timeout", vec![{
+            "cb.half_open_timeout" => ("CB Half-Open Timeout", vec![{
                 let mut f = InputField::new("Seconds", "30");
                 f.set_value(self.config.circuit_breaker.half_open_timeout_secs.to_string());
                 f
             }]),
 
             // === Model Fallback ===
-            27 => {
-                // Model Fallback toggle
+            "fallback.enabled" => {
                 self.config.model_fallback.enabled = !self.config.model_fallback.enabled;
                 if let Err(e) = self.config.save() {
                     self.show_notification(format!("Failed to save: {}", e), NotificationLevel::Error);
@@ -1471,7 +1540,7 @@ impl App {
                 return;
             }
 
-            _ => return,  // 分类标题或无效索引
+            _ => return,
         };
 
         self.dialog = Some(DialogKind::Input {
@@ -1484,9 +1553,10 @@ impl App {
 
     /// 保存 Settings 编辑结果
     fn save_settings_edit(&mut self, value: &str) -> Result<()> {
-        match self.settings_selected {
+        let key = self.settings_current_key();
+        match key {
             // === Logging ===
-            1 => {
+            "log.level" => {
                 let valid = ["trace", "debug", "info", "warn", "error"];
                 if valid.contains(&value) {
                     self.config.log.level = value.to_string();
@@ -1498,10 +1568,10 @@ impl App {
                     return Ok(());
                 }
             }
-            2 => {
+            "log.file" => {
                 self.config.log.file = if value.is_empty() { None } else { Some(value.to_string()) };
             }
-            3 => {
+            "log.max_size_mb" => {
                 if let Ok(size) = value.parse::<u64>() {
                     if size >= 1 && size <= 1000 {
                         self.config.log.max_size_mb = size;
@@ -1514,7 +1584,7 @@ impl App {
                     return Ok(());
                 }
             }
-            4 => {
+            "log.max_backups" => {
                 if let Ok(count) = value.parse::<usize>() {
                     if count >= 1 && count <= 100 {
                         self.config.log.max_backups = count;
@@ -1529,10 +1599,10 @@ impl App {
             }
 
             // === Database ===
-            6 => {
+            "db.path" => {
                 self.config.database.path = value.to_string();
             }
-            8 => {
+            "db.max_request_logs" => {
                 if let Ok(count) = value.parse::<i64>() {
                     if count >= 1000 && count <= 100_000_000 {
                         self.config.database.max_request_logs = count;
@@ -1545,12 +1615,12 @@ impl App {
                     return Ok(());
                 }
             }
-            9 => {
+            "db.archive_dir" => {
                 self.config.database.archive_dir = value.to_string();
             }
 
             // === Proxy ===
-            12 => {
+            "proxy.port" => {
                 if let Ok(port) = value.parse::<u16>() {
                     self.config.proxy.port = port;
                     self.proxy_port = port;
@@ -1559,11 +1629,11 @@ impl App {
                     return Ok(());
                 }
             }
-            13 => {
+            "proxy.bind" => {
                 self.config.proxy.bind = value.to_string();
                 self.proxy_bind = value.to_string();
             }
-            14 => {
+            "proxy.timeout" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     self.config.proxy.timeout_secs = secs;
                 } else {
@@ -1571,9 +1641,17 @@ impl App {
                     return Ok(());
                 }
             }
+            "proxy.upstream_proxy" => {
+                if value.is_empty() || value == "none" {
+                    self.config.proxy.upstream_proxy = Some("none".to_string());
+                } else {
+                    self.config.proxy.upstream_proxy = Some(value.to_string());
+                }
+                self.show_notification("Upstream proxy updated (restart daemon to apply)".to_string(), NotificationLevel::Success);
+            }
 
             // === Streaming Timeout ===
-            16 => {
+            "streaming.first_byte" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     if secs >= 1 && secs <= 300 {
                         self.config.proxy.streaming_timeout.first_byte_secs = secs;
@@ -1586,7 +1664,7 @@ impl App {
                     return Ok(());
                 }
             }
-            17 => {
+            "streaming.idle" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     if secs >= 1 && secs <= 600 {
                         self.config.proxy.streaming_timeout.idle_secs = secs;
@@ -1599,7 +1677,7 @@ impl App {
                     return Ok(());
                 }
             }
-            18 => {
+            "streaming.total" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     if secs >= 10 && secs <= 3600 {
                         self.config.proxy.streaming_timeout.total_secs = secs;
@@ -1614,7 +1692,7 @@ impl App {
             }
 
             // === Health Check ===
-            20 => {
+            "health.interval" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     self.config.health_check.interval_secs = secs;
                 } else {
@@ -1624,7 +1702,7 @@ impl App {
             }
 
             // === Circuit Breaker ===
-            22 => {
+            "cb.fail_threshold" => {
                 if let Ok(count) = value.parse::<u32>() {
                     if count > 0 && count <= 100 {
                         self.config.circuit_breaker.failure_threshold = count;
@@ -1637,7 +1715,7 @@ impl App {
                     return Ok(());
                 }
             }
-            23 => {
+            "cb.success_threshold" => {
                 if let Ok(count) = value.parse::<u32>() {
                     if count > 0 && count <= 50 {
                         self.config.circuit_breaker.success_threshold = count;
@@ -1650,7 +1728,7 @@ impl App {
                     return Ok(());
                 }
             }
-            24 => {
+            "cb.timeout" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     if secs >= 10 && secs <= 3600 {
                         self.config.circuit_breaker.timeout_secs = secs;
@@ -1663,7 +1741,7 @@ impl App {
                     return Ok(());
                 }
             }
-            25 => {
+            "cb.half_open_timeout" => {
                 if let Ok(secs) = value.parse::<u64>() {
                     if secs >= 5 && secs <= 600 {
                         self.config.circuit_breaker.half_open_timeout_secs = secs;

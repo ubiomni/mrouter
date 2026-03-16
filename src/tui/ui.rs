@@ -715,59 +715,17 @@ fn render_settings(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     // 左侧：设置项列表（按功能分类）
-    let settings_items = vec![
-        // === Logging ===
-        ("", "=== Logging ===".to_string()),
-        ("Log Level", app.config.log.level.clone()),
-        ("Log File", app.config.log.file.clone().unwrap_or_else(|| "(none)".to_string())),
-        ("Log Max Size (MB)", app.config.log.max_size_mb.to_string()),
-        ("Log Max Backups", app.config.log.max_backups.to_string()),
-
-        // === Database ===
-        ("", "=== Database ===".to_string()),
-        ("Database Path", app.config.database.path.clone()),
-        ("WAL Mode", if app.config.database.wal_mode { "Enabled" } else { "Disabled" }.to_string()),
-        ("Max Request Logs", app.config.database.max_request_logs.to_string()),
-        ("Archive Directory", app.config.database.archive_dir.clone()),
-        ("Auto Cleanup", if app.config.database.auto_cleanup { "Enabled" } else { "Disabled" }.to_string()),
-
-        // === Proxy ===
-        ("", "=== Proxy ===".to_string()),
-        ("Proxy Port", app.config.proxy.port.to_string()),
-        ("Proxy Bind", app.config.proxy.bind.clone()),
-        ("Request Timeout", format!("{}s", app.config.proxy.timeout_secs)),
-
-        // === Streaming Timeout ===
-        ("", "=== Streaming Timeout ===".to_string()),
-        ("First Byte Timeout", format!("{}s", app.config.proxy.streaming_timeout.first_byte_secs)),
-        ("Idle Timeout", format!("{}s", app.config.proxy.streaming_timeout.idle_secs)),
-        ("Total Timeout", format!("{}s", app.config.proxy.streaming_timeout.total_secs)),
-
-        // === Health Check ===
-        ("", "=== Health Check ===".to_string()),
-        ("Health Interval", format!("{}s", app.config.health_check.interval_secs)),
-
-        // === Circuit Breaker ===
-        ("", "=== Circuit Breaker ===".to_string()),
-        ("CB Fail Threshold", app.config.circuit_breaker.failure_threshold.to_string()),
-        ("CB Success Threshold", app.config.circuit_breaker.success_threshold.to_string()),
-        ("CB Timeout", format!("{}s", app.config.circuit_breaker.timeout_secs)),
-        ("CB Half-Open Timeout", format!("{}s", app.config.circuit_breaker.half_open_timeout_secs)),
-
-        // === Model Fallback ===
-        ("", "=== Model Fallback ===".to_string()),
-        ("Model Fallback", if app.config.model_fallback.enabled { "Enabled" } else { "Disabled" }.to_string()),
-    ];
+    let settings_items = app.settings_items();
 
     let items: Vec<ListItem> = settings_items
         .iter()
         .enumerate()
-        .map(|(i, (label, value))| {
+        .map(|(i, item)| {
             // 分类标题行（不可选择）
-            if label.is_empty() {
+            if item.key.is_empty() {
                 let content = Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(value.as_str(), Style::default().fg(theme::MAGENTA).add_modifier(Modifier::BOLD)),
+                    Span::styled(item.value.as_str(), Style::default().fg(theme::MAGENTA).add_modifier(Modifier::BOLD)),
                 ]);
                 return ListItem::new(content);
             }
@@ -783,9 +741,9 @@ fn render_settings(f: &mut Frame, area: Rect, app: &App) {
             let content = Line::from(vec![
                 Span::styled(marker, style),
                 Span::raw(" "),
-                Span::styled(format!("{:<25}", label), Style::default().fg(theme::YELLOW)),
+                Span::styled(format!("{:<25}", item.label), Style::default().fg(theme::YELLOW)),
                 Span::raw("  "),
-                Span::styled(value.as_str(), style),
+                Span::styled(item.value.as_str(), style),
             ]);
 
             ListItem::new(content)
