@@ -2,7 +2,7 @@
 
 use axum::http::HeaderMap;
 use serde_json::Value;
-use crate::models::{TokenUsage, ProviderType};
+use crate::models::{TokenUsage, ProviderType, ApiFormat};
 use super::token_parser::{UniversalParser, ClaudeParser, OpenAIParser, CodexParser, GeminiParser, TokenParser};
 
 /// 从响应 JSON 中提取 token 使用信息
@@ -102,6 +102,38 @@ pub fn extract_token_usage_from_sse_with_type(data: &[u8], provider_type: &Provi
         );
     } else {
         tracing::warn!("[TokenExtract] ✗ No token usage found in SSE stream");
+    }
+
+    usage
+}
+
+/// 从响应 JSON 中提取 token 使用信息（根据 API 格式选择解析器）
+/// 用于协议转换场景：provider_type 可能是 Custom，但实际返回的是 OpenAI 格式
+pub fn extract_token_usage_with_format(json: &Value, api_format: ApiFormat) -> Option<TokenUsage> {
+    match api_format {
+        ApiFormat::Anthropic => ClaudeParser.parse_response(json),
+        ApiFormat::OpenAI => OpenAIParser.parse_response(json)
+            .or_else(|| CodexParser.parse_response(json)),
+        ApiFormat::Google => GeminiParser.parse_response(json),
+    }
+}
+
+/// 从 SSE 流数据中提取 token 使用信息（根据 API 格式选择解析器）
+pub fn extract_token_usage_from_sse_with_format(data: &[u8], api_format: ApiFormat) -> Option<TokenUsage> {
+    let events = super::token_parser::extract_sse_events(data);
+
+    let usage = match api_format {
+        ApiFormat::Anthropic => ClaudeParser.parse_stream_events(&events),
+        ApiFormat::OpenAI => OpenAIParser.parse_stream_events(&events)
+            .or_else(|| CodexParser.parse_stream_events(&events)),
+        ApiFormat::Google => GeminiParser.parse_stream_events(&events),
+    };
+
+    if let Some(ref u) = usage {
+        tracing::info!(
+            "[TokenExtract] ✓ Extracted usage (by format {:?}): input={}, output={}, total={}",
+            api_format, u.input_tokens, u.output_tokens, u.total_tokens()
+        );
     }
 
     usage

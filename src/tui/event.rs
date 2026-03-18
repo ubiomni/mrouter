@@ -54,6 +54,8 @@ pub enum Action {
     ScrollLogDetailDown,  // 日志详情向下滚动
     NextLogsPage,         // 下一页日志
     PreviousLogsPage,     // 上一页日志
+    ExportProviders,      // 导出 Provider 配置到 JSON 文件
+    ImportProviders,      // 从 JSON 文件导入 Provider 配置
 }
 
 pub enum Direction {
@@ -362,6 +364,12 @@ fn handle_normal_mode(key: event::KeyEvent, app: &App) -> Result<Option<Action>>
         }
         (KeyCode::Char('o'), _) if app.current_tab == Tab::Providers => {
             Ok(Some(Action::ConfigureHeaders))
+        }
+        (KeyCode::Char('E'), _) if app.current_tab == Tab::Providers => {
+            Ok(Some(Action::ExportProviders))
+        }
+        (KeyCode::Char('I'), _) if app.current_tab == Tab::Providers => {
+            Ok(Some(Action::ImportProviders))
         }
         (KeyCode::Char('r'), _) => {
             if app.current_tab == Tab::Providers {

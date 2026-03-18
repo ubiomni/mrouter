@@ -52,6 +52,8 @@ mrouter              # 在终端中进行完整的 TUI 管理
 - 🔌 **LLM 网关代理** - 为所有 CLI 工具提供统一的代理端点
 - ⚙️ **配置同步** - 自动同步配置到 CLI 工具（Claude Code、Codex、Gemini CLI、OpenCode、OpenClaw）
 - 🔧 **自定义请求头** - 按提供商自定义请求头覆盖（User-Agent 等）
+- 🔄 **协议转换** - 自动 Anthropic ↔ OpenAI 协议双向转换，任意客户端对接任意提供商
+- 📦 **提供商导入/导出** - 导出和导入提供商配置，便于迁移
 - 🎨 **精美 TUI** - 直观的终端用户界面，支持通过 SSH 远程使用
 
 ## 快速开始
@@ -106,6 +108,8 @@ mrouter proxy status
 - `m` - 配置模型映射
 - `r` - 重置熔断器
 - `s` - 管理同步设置
+- `I` - 从 JSON 导入提供商
+- `E` - 导出提供商到 JSON
 
 ### Proxy 标签
 - `s` - 启动代理
@@ -267,6 +271,49 @@ BASE_URL=http://localhost:4444
 - 向提供商发送与客户端不同的 `User-Agent`
 - 添加某些 API 要求的提供商特定请求头
 - 覆盖默认请求头以实现兼容性调整
+
+## 协议转换
+
+MRouter 支持 Anthropic 与 OpenAI 协议之间的自动双向转换。这允许您使用任意客户端（如 Claude Code 发送 Anthropic 格式）对接任意提供商（如 DeepSeek 需要 OpenAI 格式）— 代理层透明地处理协议翻译。
+
+### 工作原理
+
+- **客户端协议**：从请求路径自动检测，`/v1/messages` → Anthropic，`/v1/chat/completions` → OpenAI
+- **提供商协议**：由提供商的 `API Format` 设置决定
+- 当客户端协议与提供商协议不一致时，MRouter 自动转换请求、响应和 SSE 流式事件
+
+### 配置方式
+
+在添加/编辑提供商时设置 `API Format` 字段：
+
+| API Format | 行为 |
+|---|---|
+| **Auto**（默认） | 透传 — 不做转换，请求原样转发 |
+| **Anthropic** | 提供商使用 Anthropic 协议。如果客户端发送 OpenAI 格式，自动转换 |
+| **OpenAI** | 提供商使用 OpenAI 协议。如果客户端发送 Anthropic 格式，自动转换 |
+
+### 示例：Claude Code → DeepSeek
+
+Claude Code 发送 Anthropic 格式（`/v1/messages`），但 DeepSeek 使用 OpenAI 格式：
+
+1. 添加 DeepSeek 提供商，设置 `API Format = OpenAI`
+2. Claude Code 向 `http://localhost:4444/v1/messages` 发送请求
+3. MRouter 检测到协议不匹配（客户端=Anthropic，提供商=OpenAI）
+4. 请求被转换：Anthropic → OpenAI 格式，路径 → `/v1/chat/completions`
+5. 响应/SSE 流被反向转换：OpenAI → Anthropic 格式
+
+### 转换内容
+
+- **请求**：system 消息、消息内容格式、max_tokens、stop sequences、请求路径
+- **响应**：content blocks、finish reason、usage 统计
+- **SSE 流式**：Anthropic 事件（`message_start`、`content_block_delta`、`message_delta`、`message_stop`）↔ OpenAI chunks（`chat.completion.chunk`、`[DONE]`）
+
+## 提供商导入/导出
+
+导出和导入提供商配置，便于在不同机器之间迁移或备份。
+
+- **导出**（`Shift+E`）：将所有提供商保存到 `~/.mrouter/providers.json`
+- **导入**（`Shift+I`）：从 `~/.mrouter/providers.json` 加载提供商，按名称跳过重复项
 
 ## Token 统计
 

@@ -8,6 +8,9 @@ Cargo.lock
 *.sql
 *.bak
 Cross.toml
+*.md
+!README.md
+!README_zh.md
 
 node_modules
 **/node_modules/

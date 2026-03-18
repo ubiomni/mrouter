@@ -390,6 +390,18 @@ impl ProviderType {
         Self::all().iter().any(|pt| pt.default_base_url() == url)
     }
 
+    /// 检查给定的 supported models 值是否是任何 provider type 的默认值
+    pub fn is_default_supported_models(value: &str) -> bool {
+        if value.is_empty() || value.contains("auto-filled") {
+            return true;
+        }
+
+        Self::all().iter().any(|pt| {
+            let defaults = pt.default_supported_models();
+            !defaults.is_empty() && defaults.join(", ") == value
+        })
+    }
+
     pub fn all() -> Vec<ProviderType> {
         vec![
             ProviderType::Anthropic,
@@ -478,7 +490,9 @@ pub struct Provider {
     /// 是否启用 Token 使用统计
     #[serde(default = "default_enable_stats")]
     pub enable_stats: bool,
-    /// API 格式（None = 根据 provider_type 自动推断）
+    /// API 格式
+    /// None (Auto) = 透传不转换
+    /// Some(...) = 明确指定 upstream 协议，当 client 协议不同时自动转换
     #[serde(default)]
     pub api_format: Option<ApiFormat>,
 }
@@ -523,6 +537,12 @@ impl Provider {
     /// 获取有效的 API 格式：有用户指定值用用户值，否则用 provider_type 默认值
     pub fn effective_api_format(&self) -> ApiFormat {
         self.api_format.unwrap_or_else(|| self.provider_type.default_api_format())
+    }
+
+    /// 是否需要协议转换：api_format 明确指定为 Anthropic 或 OpenAI 时启用
+    /// Google 协议暂不支持双向转换
+    pub fn needs_format_conversion(&self) -> bool {
+        matches!(self.api_format, Some(ApiFormat::Anthropic) | Some(ApiFormat::OpenAI))
     }
 
     /// 检查是否支持指定的模型

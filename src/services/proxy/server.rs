@@ -39,12 +39,37 @@ impl ProxyServer {
         let config = crate::config::AppConfig::load()
             .expect("Failed to load config");
 
-        let http_client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .connect_timeout(std::time::Duration::from_secs(30))
             .pool_max_idle_per_host(10)
-            .tcp_keepalive(std::time::Duration::from_secs(60))
-            .build()
+            .tcp_keepalive(std::time::Duration::from_secs(60));
+
+        // Configure upstream proxy
+        match config.proxy.upstream_proxy.as_deref() {
+            Some("none") | Some("") => {
+                // Explicitly disable system proxy
+                client_builder = client_builder.no_proxy();
+                tracing::info!("[Proxy] Upstream proxy disabled (no_proxy)");
+            }
+            Some(proxy_url) => {
+                match reqwest::Proxy::all(proxy_url) {
+                    Ok(proxy) => {
+                        client_builder = client_builder.proxy(proxy);
+                        tracing::info!("[Proxy] Using upstream proxy: {}", proxy_url);
+                    }
+                    Err(e) => {
+                        tracing::error!("[Proxy] Invalid upstream_proxy '{}': {}, falling back to system proxy", proxy_url, e);
+                    }
+                }
+            }
+            None => {
+                // Follow system env (http_proxy, https_proxy, ALL_PROXY)
+                tracing::info!("[Proxy] Using system proxy settings (from env)");
+            }
+        }
+
+        let http_client = client_builder.build()
             .expect("Failed to create HTTP client");
 
         let state = ProxyState {

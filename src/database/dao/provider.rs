@@ -49,7 +49,7 @@ impl ProviderDao {
                 supported_models,
                 enable_stats: row.get::<_, i32>(14)? != 0,
                 api_format,
-            })
+                            })
         })?;
 
         let mut result = Vec::new();
@@ -97,7 +97,7 @@ impl ProviderDao {
                 supported_models,
                 enable_stats: row.get::<_, i32>(14)? != 0,
                 api_format,
-            })
+                            })
         })?;
 
         let mut result = Vec::new();
@@ -146,7 +146,7 @@ impl ProviderDao {
                 supported_models,
                 enable_stats: row.get::<_, i32>(14)? != 0,
                 api_format,
-            }))
+                            }))
         } else {
             Ok(None)
         }

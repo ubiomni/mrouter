@@ -49,12 +49,7 @@ pub fn render(f: &mut Frame, app: &App) {
     // 渲染状态栏
     render_status_bar(f, chunks[3], app);
 
-    // 渲染通知
-    if let Some(notification) = &app.notification {
-        render_notification(f, notification);
-    }
-
-    // 渲染对话框（最上层）
+    // 渲染对话框
     if let Some(dialog_kind) = &app.dialog {
         match dialog_kind {
             DialogKind::Confirm { title, message } => {
@@ -79,10 +74,15 @@ pub fn render(f: &mut Frame, app: &App) {
     if app.show_help {
         dialog::render_help_dialog(f);
     }
+
+    // 渲染通知（最上层，不被对话框遮挡）
+    if let Some(notification) = &app.notification {
+        render_notification(f, notification);
+    }
 }
 
 fn render_header(f: &mut Frame, area: Rect, _app: &App) {
-    let title = " MRouter v0.1.0  │  LLM Gateway Router  │  [?] Help ";
+    let title = format!(" MRouter v{}  │  LLM Gateway Router  │  [?] Help ", env!("CARGO_PKG_VERSION"));
     let header = Paragraph::new(title)
         .style(Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)));

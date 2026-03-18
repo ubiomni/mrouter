@@ -266,6 +266,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                 tui::event::Action::ResetCircuitBreaker => {
                     app.handle_reset_circuit_breaker().await?;
                 }
+                tui::event::Action::ExportProviders => {
+                    app.handle_export_providers()?;
+                }
+                tui::event::Action::ImportProviders => {
+                    app.handle_import_providers().await?;
+                }
                 tui::event::Action::ToggleStatsTimeRange => {
                     app.handle_toggle_stats_time_range()?;
                 }

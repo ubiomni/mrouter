@@ -362,11 +362,104 @@ pub fn render_confirm_dialog(f: &mut Frame, title: &str, message: &str) {
 }
 
 /// 渲染输入对话框
+/// Provider 对话框中 select 字段的左右布局高度
+fn select_split_height(field: &InputField) -> u16 {
+    if field.label.contains("Type") { 6 } else { 4 }
+}
+
+/// 渲染 select 字段：左侧文本框 + 右侧常驻列表（Provider 对话框专用）
+fn render_select_field_split(f: &mut Frame, field: &InputField, is_focused: bool, area: Rect) {
+    let border_color = if is_focused { theme::YELLOW } else { theme::MUTED };
+    let label_color = if is_focused { theme::YELLOW } else { theme::TEXT };
+
+    // 左右分割: 左 40% 文本框, 右 60% 列表
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(60),
+        ])
+        .split(area);
+
+    // 左侧: Type 文本框 (占满整个左侧高度)
+    let filter = field.select_filter();
+    let display = field.display_value();
+    let cursor = if is_focused { "▎" } else { "" };
+    let value_color = if filter.is_empty() { theme::CYAN } else { theme::TEXT };
+    let hint = if is_focused && filter.is_empty() { "\n  ↑↓ select\n  type to filter" } else { "" };
+
+    let input = Paragraph::new(format!(" {}{}{}", display, cursor, hint))
+        .style(Style::default().fg(value_color))
+        .block(
+            Block::default()
+                .title(Span::styled(format!(" {} ", field.label), Style::default().fg(label_color)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+        );
+    f.render_widget(input, h_chunks[0]);
+
+    // 右侧: Type 列表 (常驻显示)
+    if let Some((options, filtered, highlight)) = field.select_state() {
+        let list_border_color = if is_focused { theme::YELLOW } else { theme::MUTED };
+        let visible_rows = h_chunks[1].height.saturating_sub(2) as usize;
+        let total_items = filtered.len();
+
+        let scroll_offset = if highlight >= visible_rows / 2 {
+            (highlight - visible_rows / 2).min(total_items.saturating_sub(visible_rows))
+        } else {
+            0
+        };
+        let visible_end = (scroll_offset + visible_rows).min(total_items);
+
+        let items: Vec<ListItem> = filtered[scroll_offset..visible_end]
+            .iter()
+            .enumerate()
+            .map(|(vi, &opt_idx)| {
+                let fi = scroll_offset + vi;
+                let name = &options[opt_idx];
+                let is_hl = fi == highlight;
+                let is_current = name == &field.value;
+                let style = if is_hl && is_focused {
+                    Style::default().fg(theme::BASE).bg(theme::CYAN).add_modifier(Modifier::BOLD)
+                } else if is_current {
+                    Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
+                let marker = if is_current { " ● " } else { "   " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(name.as_str(), style),
+                ]))
+            })
+            .collect();
+
+        let match_info = format!(" {}/{} ", filtered.len(), options.len());
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(Span::styled(match_info, Style::default().fg(theme::MUTED)))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(list_border_color))
+            );
+        f.render_widget(list, h_chunks[1]);
+    }
+}
+
 pub fn render_input_dialog(f: &mut Frame, title: &str, fields: &[InputField], focused: usize) {
-    // 只在聚焦 select 字段时预留下拉列表空间
+    let is_provider_dialog = title.contains("Provider");
+
+    // 只在非 Provider 对话框 聚焦 select 字段时预留下拉列表空间
     let has_active_select = fields.get(focused).map_or(false, |f| f.is_select());
-    let dropdown_rows: u16 = if has_active_select { 8 } else { 0 };
-    let desired_height = (fields.len() as u16 * 3) + 5 + dropdown_rows;
+    let dropdown_rows: u16 = if has_active_select && !is_provider_dialog { 8 } else { 0 };
+
+    // 计算总高度
+    let fields_height: u16 = if is_provider_dialog {
+        fields.iter().map(|f| if f.is_select() { select_split_height(f) } else { 3 }).sum()
+    } else {
+        fields.len() as u16 * 3
+    };
+    let desired_height = fields_height + 5 + dropdown_rows;
 
     // 获取可用高度，确保对话框不会超出屏幕
     let available_height = f.area().height.saturating_sub(4); // 留出边距
@@ -386,30 +479,69 @@ pub fn render_input_dialog(f: &mut Frame, title: &str, fields: &[InputField], fo
 
     // 计算可见字段范围（支持滚动）
     let inner_height = inner.height as usize;
-    let field_height = 3; // 每个字段占 3 行
-    let max_visible_fields = (inner_height.saturating_sub(2)) / field_height; // 减去按钮行
+    let field_height = 3; // 普通字段占 3 行
 
-    // 计算滚动偏移，确保聚焦的字段可见
-    let scroll_offset = if fields.len() > max_visible_fields {
-        if focused >= max_visible_fields {
-            focused.saturating_sub(max_visible_fields / 2).min(fields.len().saturating_sub(max_visible_fields))
+    // Provider 对话框: field[0] (Type) 固定显示不参与滚动，只滚动 field[1..]
+    let (visible_fields_range,) = if is_provider_dialog {
+        let remaining_fields = fields.len().saturating_sub(1);
+        let type_height = select_split_height(&fields[0]) as usize;
+        let remaining_height = inner_height.saturating_sub(type_height).saturating_sub(2);
+        // 计算剩余区域能容纳多少字段行（select 字段占 split_select_height）
+        let mut max_vis = 0;
+        let mut used = 0usize;
+        for fi in 1..fields.len() {
+            let h = if fields[fi].is_select() { select_split_height(&fields[fi]) as usize } else { field_height };
+            if used + h > remaining_height { break; }
+            used += h;
+            max_vis += 1;
+        }
+        let adjusted_focused = focused.saturating_sub(1);
+        let offset = if focused == 0 {
+            0
+        } else if remaining_fields > max_vis {
+            if adjusted_focused >= max_vis {
+                adjusted_focused.saturating_sub(max_vis / 2).min(remaining_fields.saturating_sub(max_vis))
+            } else {
+                0
+            }
         } else {
             0
-        }
+        };
+        let end = (offset + max_vis).min(remaining_fields);
+        (1 + offset..1 + end,)
     } else {
-        0
+        let max_visible_fields = (inner_height.saturating_sub(2)) / field_height;
+        let offset = if fields.len() > max_visible_fields {
+            if focused >= max_visible_fields {
+                focused.saturating_sub(max_visible_fields / 2).min(fields.len().saturating_sub(max_visible_fields))
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let end = (offset + max_visible_fields).min(fields.len());
+        (offset..end,)
     };
 
-    let visible_end = (scroll_offset + max_visible_fields).min(fields.len());
-    let visible_fields = &fields[scroll_offset..visible_end];
-
-    // 构建 layout
+    // 构建 layout constraints
     let mut constraints: Vec<Constraint> = Vec::new();
+
+    if is_provider_dialog {
+        constraints.push(Constraint::Length(select_split_height(&fields[0])));
+    }
+
+    // 其余可见字段
+    let visible_fields = &fields[visible_fields_range.clone()];
     for (i, field) in visible_fields.iter().enumerate() {
-        constraints.push(Constraint::Length(3));
-        let actual_index = scroll_offset + i;
-        if actual_index == focused && field.is_select() {
-            constraints.push(Constraint::Length(dropdown_rows));
+        if is_provider_dialog && field.is_select() {
+            constraints.push(Constraint::Length(select_split_height(field)));
+        } else {
+            constraints.push(Constraint::Length(3));
+            let actual_index = visible_fields_range.start + i;
+            if !is_provider_dialog && actual_index == focused && field.is_select() {
+                constraints.push(Constraint::Length(dropdown_rows));
+            }
         }
     }
     constraints.push(Constraint::Length(2));
@@ -421,13 +553,25 @@ pub fn render_input_dialog(f: &mut Frame, title: &str, fields: &[InputField], fo
         .split(inner);
 
     let mut chunk_idx = 0;
+
+    // Provider 对话框: 渲染 Type 左右布局
+    if is_provider_dialog {
+        render_select_field_split(f, &fields[0], focused == 0, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
+
+    // 渲染其余字段
     for (i, field) in visible_fields.iter().enumerate() {
-        let actual_index = scroll_offset + i;
+        let actual_index = visible_fields_range.start + i;
         let is_focused = actual_index == focused;
         let border_color = if is_focused { theme::YELLOW } else { theme::MUTED };
         let label_color = if is_focused { theme::YELLOW } else { theme::TEXT };
 
-        if field.is_select() {
+        // Provider 对话框: select 字段全部用左右布局
+        if is_provider_dialog && field.is_select() {
+            render_select_field_split(f, field, is_focused, chunks[chunk_idx]);
+            chunk_idx += 1;
+        } else if field.is_select() {
             let filter = field.select_filter();
             let display = field.display_value();
             let cursor = if is_focused { "▎" } else { "" };
@@ -687,6 +831,8 @@ pub fn render_help_dialog(f: &mut Frame) {
         Line::from(Span::styled("  o         Configure auth header", Style::default().fg(theme::TEXT))),
         Line::from(Span::styled("  r         Reset circuit breaker", Style::default().fg(theme::TEXT))),
         Line::from(Span::styled("  s         Manage sync settings", Style::default().fg(theme::TEXT))),
+        Line::from(Span::styled("  I         Import providers (from ~/.mrouter/providers.json)", Style::default().fg(theme::TEXT))),
+        Line::from(Span::styled("  E         Export providers (to ~/.mrouter/providers.json)", Style::default().fg(theme::TEXT))),
         Line::from(""),
         Line::from(Span::styled("Proxy Tab", Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled("  s         Start proxy", Style::default().fg(theme::TEXT))),

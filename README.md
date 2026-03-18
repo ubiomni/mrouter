@@ -52,6 +52,8 @@ No web browser or port forwarding needed — add providers, switch routes, view 
 - 🔌 **LLM Gateway Proxy** - Unified proxy endpoint for all CLI tools
 - ⚙️ **Config Sync** - Automatic configuration sync to CLI tools (Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw)
 - 🔧 **Custom Headers** - Per-provider custom header overrides (User-Agent, etc.)
+- 🔄 **Protocol Conversion** - Automatic Anthropic ↔ OpenAI protocol conversion, use any client with any provider
+- 📦 **Provider Import/Export** - Export and import provider configurations for easy migration
 - 🎨 **Beautiful TUI** - Intuitive terminal user interface with keyboard shortcuts, works over SSH
 
 ## Quick Start
@@ -106,6 +108,8 @@ mrouter proxy status
 - `m` - Configure model mappings
 - `r` - Reset circuit breaker
 - `s` - Manage sync settings
+- `I` - Import providers from JSON
+- `E` - Export providers to JSON
 
 ### Proxy Tab
 - `s` - Start proxy
@@ -267,6 +271,49 @@ This is useful for:
 - Sending a different `User-Agent` to providers than what the client sends
 - Adding provider-specific headers required by certain APIs
 - Overriding default headers for compatibility
+
+## Protocol Conversion
+
+MRouter supports automatic bidirectional protocol conversion between Anthropic and OpenAI formats. This allows you to use any client (e.g., Claude Code sending Anthropic format) with any provider (e.g., DeepSeek expecting OpenAI format) — the proxy handles the translation transparently.
+
+### How It Works
+
+- **Client format** is auto-detected from the request path: `/v1/messages` → Anthropic, `/v1/chat/completions` → OpenAI
+- **Provider format** is determined by the provider's `API Format` setting
+- When the client format differs from the provider format, MRouter automatically converts requests, responses, and SSE streaming events
+
+### Configuration
+
+Set the `API Format` field when adding/editing a provider:
+
+| API Format | Behavior |
+|---|---|
+| **Auto** (default) | Passthrough — no conversion, requests forwarded as-is |
+| **Anthropic** | Provider expects Anthropic protocol. If client sends OpenAI format, auto-convert |
+| **OpenAI** | Provider expects OpenAI protocol. If client sends Anthropic format, auto-convert |
+
+### Example: Claude Code → DeepSeek
+
+Claude Code sends Anthropic format (`/v1/messages`), but DeepSeek uses OpenAI format:
+
+1. Add DeepSeek provider with `API Format = OpenAI`
+2. Claude Code sends request to `http://localhost:4444/v1/messages`
+3. MRouter detects mismatch (client=Anthropic, provider=OpenAI)
+4. Request is converted: Anthropic → OpenAI format, path → `/v1/chat/completions`
+5. Response/SSE stream is converted back: OpenAI → Anthropic format
+
+### What Gets Converted
+
+- **Request**: system message, message content format, max_tokens, stop sequences, path
+- **Response**: content blocks, finish reason, usage stats
+- **SSE Streaming**: Anthropic events (`message_start`, `content_block_delta`, `message_delta`, `message_stop`) ↔ OpenAI chunks (`chat.completion.chunk`, `[DONE]`)
+
+## Provider Import/Export
+
+Export and import provider configurations for easy migration between machines or backup.
+
+- **Export** (`Shift+E`): Saves all providers to `~/.mrouter/providers.json`
+- **Import** (`Shift+I`): Loads providers from `~/.mrouter/providers.json`, skipping duplicates by name
 
 ## Token Statistics
 

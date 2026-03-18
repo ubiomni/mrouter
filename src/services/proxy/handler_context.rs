@@ -1,7 +1,7 @@
 use axum::http::HeaderMap;
 use tokio::time::Instant;
 use chrono::{DateTime, Utc};
-use crate::models::{Provider, AppType};
+use crate::models::{Provider, AppType, ApiFormat};
 use crate::database::dao::ProviderDao;
 use super::error::ProxyError;
 use super::server::ProxyState;
@@ -24,6 +24,8 @@ pub struct RequestContext {
     pub request_method: String,
     /// Model fallback chain (original model + degraded alternatives)
     pub models_to_try: Vec<Option<String>>,
+    /// Client protocol format detected from request path
+    pub client_format: ApiFormat,
 }
 
 impl RequestContext {
@@ -101,6 +103,9 @@ impl RequestContext {
             }
         }
 
+        // Detect client protocol format from request path
+        let client_format = detect_client_format(&request_path);
+
         Ok(RequestContext {
             start_time,
             request_time,
@@ -110,6 +115,7 @@ impl RequestContext {
             request_path,
             request_method,
             models_to_try,
+            client_format,
         })
     }
 
@@ -173,6 +179,18 @@ fn detect_client_type(headers: &HeaderMap) -> AppType {
     }
 
     AppType::ClaudeCode
+}
+
+/// Detect client protocol format from request path
+fn detect_client_format(path: &str) -> ApiFormat {
+    if path.contains("/v1/chat/completions") {
+        ApiFormat::OpenAI
+    } else if path.contains("/v1/messages") {
+        ApiFormat::Anthropic
+    } else {
+        // Default to Anthropic (most Claude Code clients)
+        ApiFormat::Anthropic
+    }
 }
 
 /// Log client feature headers for debugging

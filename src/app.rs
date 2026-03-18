@@ -571,35 +571,33 @@ impl App {
                     let current_idx = crate::models::ProviderType::all()
                         .iter().position(|t| *t == provider.provider_type).unwrap_or(0);
 
-                    let mut fields = vec![
-                        InputField::select("Type", type_options, current_idx),
-                        InputField::new("Name", ""),
-                        InputField::password("API Key", ""),
-                        InputField::new("Base URL", ""),
-                        InputField::new("Model", ""),
-                        InputField::new("Priority", "0"),
-                        InputField::new("Supported Models", ""),
-                        InputField::select("API Format", vec!["Auto".into(), "Anthropic".into(), "OpenAI".into(), "Google".into()], 0),
-                        InputField::checkbox("Enable Token Stats", false),
-                    ];
-
-                    // 预填充现有值
-                    fields[1].set_value(provider.name.clone());
-                    fields[2].set_value(provider.api_key.clone());
-                    fields[3].set_value(provider.base_url.clone());
-                    fields[4].set_value(provider.model.clone().unwrap_or_default());
-                    fields[5].set_value(provider.priority.to_string());
-                    fields[6].set_value(provider.supported_models.as_ref()
-                        .map(|models| models.join(", "))
-                        .unwrap_or_default());
-                    // API Format: 预填充
                     let api_format_idx = match provider.api_format {
                         None => 0,  // Auto
                         Some(crate::models::ApiFormat::Anthropic) => 1,
                         Some(crate::models::ApiFormat::OpenAI) => 2,
                         Some(crate::models::ApiFormat::Google) => 3,
                     };
-                    fields[7] = InputField::select("API Format", vec!["Auto".into(), "Anthropic".into(), "OpenAI".into(), "Google".into()], api_format_idx);
+                    let mut fields = vec![
+                        InputField::select("Type", type_options, current_idx),        // 0
+                        InputField::new("Name", ""),                                   // 1
+                        InputField::password("API Key", ""),                            // 2
+                        InputField::new("Base URL", ""),                                // 3
+                        InputField::select("API Format", vec!["Auto".into(), "Anthropic".into(), "OpenAI".into(), "Google".into()], api_format_idx), // 4
+                        InputField::new("Model", ""),                                   // 5
+                        InputField::new("Supported Models", ""),                        // 6
+                        InputField::new("Priority", "0"),                               // 7
+                        InputField::checkbox("Enable Token Stats", false),              // 8
+                    ];
+
+                    // 预填充现有值
+                    fields[1].set_value(provider.name.clone());
+                    fields[2].set_value(provider.api_key.clone());
+                    fields[3].set_value(provider.base_url.clone());
+                    fields[5].set_value(provider.model.clone().unwrap_or_default());
+                    fields[6].set_value(provider.supported_models.as_ref()
+                        .map(|models| models.join(", "))
+                        .unwrap_or_default());
+                    fields[7].set_value(provider.priority.to_string());
                     fields[8] = InputField::checkbox("Enable Token Stats", provider.enable_stats);
 
                     self.dialog = Some(DialogKind::Input {
@@ -682,15 +680,15 @@ impl App {
                     .iter().map(|t| t.display_name().to_string()).collect();
 
                 let mut fields = vec![
-                    InputField::select("Type", type_options, 0),
-                    InputField::new("Name", "My Anthropic Key"),
-                    InputField::password("API Key", "sk-xxx..."),
-                    InputField::new("Base URL", "(auto-fill from type)"),
-                    InputField::new("Model", ""),
-                    InputField::new("Priority", "0 (lower = higher priority)"),
-                    InputField::new("Supported Models", "gpt-4, gpt-4-turbo, gpt-3.5-turbo (comma-separated, optional)"),
-                    InputField::select("API Format", vec!["Auto".into(), "Anthropic".into(), "OpenAI".into(), "Google".into()], 0),
-                    InputField::checkbox("Enable Token Stats", false),
+                    InputField::select("Type", type_options, 0),                    // 0
+                    InputField::new("Name", "My Anthropic Key"),                     // 1
+                    InputField::password("API Key", "sk-xxx..."),                    // 2
+                    InputField::new("Base URL", "(auto-fill from type)"),             // 3
+                    InputField::select("API Format", vec!["Auto".into(), "Anthropic".into(), "OpenAI".into(), "Google".into()], 0), // 4
+                    InputField::new("Model", ""),                                     // 5
+                    InputField::new("Supported Models", "gpt-4, gpt-4-turbo, gpt-3.5-turbo (comma-separated, optional)"), // 6
+                    InputField::new("Priority", "0 (lower = higher priority)"),       // 7
+                    InputField::checkbox("Enable Token Stats", false),                // 8
                 ];
 
                 // 自动填充默认 provider type (Anthropic) 的 base_url 和 model
@@ -703,7 +701,7 @@ impl App {
                     // Model: 从 supported_models 取第一个
                     let models = provider_type.default_supported_models();
                     if !models.is_empty() {
-                        fields[4].set_value(models[0].clone());
+                        fields[5].set_value(models[0].clone());
                         fields[6].set_value(models.join(", "));
                         fields[6].placeholder = "(auto-filled, press Ctrl+F to fetch latest)".to_string();
                     }
@@ -879,9 +877,12 @@ impl App {
                             if !default_models.is_empty() {
                                 // 释放 field 的可变借用后再访问 fields[6]
                                 let _ = field;
+                                // 仅当当前值是默认值时才覆盖
                                 if let Some(models_field) = fields.get_mut(6) {
-                                    models_field.value = default_models.join(", ");
-                                    models_field.placeholder = "(auto-filled, fetching latest...)".to_string();
+                                    if crate::models::ProviderType::is_default_supported_models(&models_field.value) {
+                                        models_field.value = default_models.join(", ");
+                                        models_field.placeholder = "(auto-filled, fetching latest...)".to_string();
+                                    }
                                 }
 
                                 *focused_field = (*focused_field + 1) % fields.len();
@@ -1045,19 +1046,24 @@ impl App {
                     let name = fields[1].value.clone();
                     let api_key = fields[2].value.clone();
                     let base_url = fields[3].value.clone();
-                    // Model: 为空时设为 None（透传模式）
-                    let model = if fields[4].value.is_empty() {
+                    // API Format: 从 select 字段读取 (index 4)
+                    let api_format = if fields.len() > 4 {
+                        match fields[4].value.as_str() {
+                            "Anthropic" => Some(crate::models::ApiFormat::Anthropic),
+                            "OpenAI" => Some(crate::models::ApiFormat::OpenAI),
+                            "Google" => Some(crate::models::ApiFormat::Google),
+                            _ => None, // "Auto" or anything else
+                        }
+                    } else {
+                        None
+                    };
+                    // Model: 为空时设为 None（透传模式） (index 5)
+                    let model = if fields[5].value.is_empty() {
                         None
                     } else {
-                        Some(fields[4].value.clone())
+                        Some(fields[5].value.clone())
                     };
-                    // Priority: 如果为空，使用 placeholder 或默认值 0
-                    let priority = if fields[5].value.is_empty() {
-                        fields[5].placeholder.parse::<i32>().unwrap_or(0)
-                    } else {
-                        fields[5].value.parse::<i32>().unwrap_or(0)
-                    };
-                    // Supported Models: 解析逗号分隔的字符串
+                    // Supported Models: 解析逗号分隔的字符串 (index 6)
                     let supported_models = if fields.len() > 6 && !fields[6].value.is_empty() {
                         let models: Vec<String> = fields[6].value
                             .split(',')
@@ -1072,22 +1078,17 @@ impl App {
                     } else {
                         None
                     };
-                    // Enable Stats: 从 checkbox 字段读取
+                    // Priority: 如果为空，使用 placeholder 或默认值 0 (index 7)
+                    let priority = if fields[7].value.is_empty() {
+                        fields[7].placeholder.parse::<i32>().unwrap_or(0)
+                    } else {
+                        fields[7].value.parse::<i32>().unwrap_or(0)
+                    };
+                    // Enable Stats: 从 checkbox 字段读取 (index 8)
                     let enable_stats = if fields.len() > 8 {
                         fields[8].value == "true"
                     } else {
-                        false  // 兜底：无 checkbox 字段时默认不启用
-                    };
-                    // API Format: 从 select 字段读取
-                    let api_format = if fields.len() > 7 {
-                        match fields[7].value.as_str() {
-                            "Anthropic" => Some(crate::models::ApiFormat::Anthropic),
-                            "OpenAI" => Some(crate::models::ApiFormat::OpenAI),
-                            "Google" => Some(crate::models::ApiFormat::Google),
-                            _ => None, // "Auto" or anything else
-                        }
-                    } else {
-                        None
+                        false
                     };
 
                     let provider_type = type_str.parse::<crate::models::ProviderType>()
@@ -1887,29 +1888,25 @@ impl App {
                                 }
                             }
 
-                            // 2. 自动填充 model 和 supported_models
-                            let models_field_cleared = fields.get(6)
-                                .map(|f| f.manually_cleared)
-                                .unwrap_or(false);
-
-                            if !models_field_cleared {
-                                let models = provider_type.default_supported_models();
-                                if !models.is_empty() {
-                                    // Model 字段：从 supported_models 取第一个（仅当当前值是空或某个 provider 的默认首选）
-                                    if let Some(model_field) = fields.get_mut(4) {
-                                        let is_default_model = model_field.value.is_empty()
-                                            || crate::models::ProviderType::all().iter().any(|pt| {
-                                                let dm = pt.default_supported_models();
-                                                !dm.is_empty() && dm[0] == model_field.value
-                                            });
-                                        if is_default_model {
-                                            model_field.set_value(models[0].clone());
-                                        }
+                            // 2. 自动填充 model 和 supported_models（仅当当前值是默认值时）
+                            let models = provider_type.default_supported_models();
+                            if !models.is_empty() {
+                                // Model 字段 (index 5)
+                                if let Some(model_field) = fields.get_mut(5) {
+                                    let is_default_model = model_field.value.is_empty()
+                                        || crate::models::ProviderType::all().iter().any(|pt| {
+                                            let dm = pt.default_supported_models();
+                                            !dm.is_empty() && dm[0] == model_field.value
+                                        });
+                                    if is_default_model {
+                                        model_field.set_value(models[0].clone());
                                     }
-                                    if let Some(models_field) = fields.get_mut(6) {
+                                }
+                                // Supported Models 字段 (index 6)：仅覆盖默认值，保留用户自定义数据
+                                if let Some(models_field) = fields.get_mut(6) {
+                                    if crate::models::ProviderType::is_default_supported_models(&models_field.value) {
                                         models_field.value = models.join(", ");
                                         models_field.placeholder = "(auto-filled, press Ctrl+F to fetch latest)".to_string();
-                                        models_field.manually_cleared = false;
                                     }
                                 }
                             }
@@ -1949,28 +1946,24 @@ impl App {
                                 }
                             }
 
-                            // 2. 自动填充 model 和 supported_models
-                            let models_field_cleared = fields.get(6)
-                                .map(|f| f.manually_cleared)
-                                .unwrap_or(false);
-
-                            if !models_field_cleared {
-                                let models = provider_type.default_supported_models();
-                                if !models.is_empty() {
-                                    if let Some(model_field) = fields.get_mut(4) {
-                                        let is_default_model = model_field.value.is_empty()
-                                            || crate::models::ProviderType::all().iter().any(|pt| {
-                                                let dm = pt.default_supported_models();
-                                                !dm.is_empty() && dm[0] == model_field.value
-                                            });
-                                        if is_default_model {
-                                            model_field.set_value(models[0].clone());
-                                        }
+                            // 2. 自动填充 model 和 supported_models（仅当当前值是默认值时）
+                            let models = provider_type.default_supported_models();
+                            if !models.is_empty() {
+                                if let Some(model_field) = fields.get_mut(5) {
+                                    let is_default_model = model_field.value.is_empty()
+                                        || crate::models::ProviderType::all().iter().any(|pt| {
+                                            let dm = pt.default_supported_models();
+                                            !dm.is_empty() && dm[0] == model_field.value
+                                        });
+                                    if is_default_model {
+                                        model_field.set_value(models[0].clone());
                                     }
-                                    if let Some(models_field) = fields.get_mut(6) {
+                                }
+                                // Supported Models：仅覆盖默认值，保留用户自定义数据
+                                if let Some(models_field) = fields.get_mut(6) {
+                                    if crate::models::ProviderType::is_default_supported_models(&models_field.value) {
                                         models_field.value = models.join(", ");
                                         models_field.placeholder = "(auto-filled, press Ctrl+F to fetch latest)".to_string();
-                                        models_field.manually_cleared = false;
                                     }
                                 }
                             }
@@ -2683,6 +2676,160 @@ impl App {
             });
         }
         Ok(())
+    }
+
+    /// 导出所有 Provider 到 JSON 文件
+    pub fn handle_export_providers(&mut self) -> Result<()> {
+        if self.providers.is_empty() {
+            self.show_notification("No providers to export".to_string(), NotificationLevel::Warning);
+            return Ok(());
+        }
+
+        let export_path = Self::providers_export_path()?;
+
+        // Build export data: strip internal fields
+        let export_data: Vec<serde_json::Value> = self.providers.iter().map(|p| {
+            let mut obj = serde_json::json!({
+                "provider_type": p.provider_type.as_str(),
+                "name": p.name,
+                "is_active": p.is_active,
+                "api_key": p.api_key,
+                "base_url": p.base_url,
+                "priority": p.priority,
+                "config": p.config,
+                "enable_stats": p.enable_stats,
+            });
+            if let Some(ref model) = p.model {
+                obj["model"] = serde_json::json!(model);
+            }
+            if let Some(ref models) = p.supported_models {
+                obj["supported_models"] = serde_json::json!(models);
+            }
+            if let Some(fmt) = p.api_format {
+                obj["api_format"] = serde_json::json!(fmt.to_string());
+            }
+            if !p.sync_to_cli_tools.is_empty() {
+                obj["sync_to_cli_tools"] = serde_json::json!(p.sync_to_cli_tools);
+            }
+            obj
+        }).collect();
+
+        let json_str = serde_json::to_string_pretty(&export_data)?;
+        if let Some(parent) = export_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&export_path, &json_str)?;
+
+        self.show_notification(
+            format!("Exported {} providers to {}", export_data.len(), export_path.display()),
+            NotificationLevel::Success,
+        );
+        Ok(())
+    }
+
+    /// 从 JSON 文件导入 Provider
+    pub async fn handle_import_providers(&mut self) -> Result<()> {
+        let import_path = Self::providers_export_path()?;
+
+        if !import_path.exists() {
+            self.show_notification(
+                format!("Import file not found: {}", import_path.display()),
+                NotificationLevel::Error,
+            );
+            return Ok(());
+        }
+
+        let json_str = fs::read_to_string(&import_path)?;
+        let import_data: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
+            Ok(data) => data,
+            Err(e) => {
+                self.show_notification(
+                    format!("Invalid JSON: {}", e),
+                    NotificationLevel::Error,
+                );
+                return Ok(());
+            }
+        };
+
+        if import_data.is_empty() {
+            self.show_notification("Import file is empty".to_string(), NotificationLevel::Warning);
+            return Ok(());
+        }
+
+        // Get existing provider names for duplicate detection
+        let existing_names: std::collections::HashSet<String> =
+            self.providers.iter().map(|p| p.name.clone()).collect();
+
+        let mut imported = 0;
+        let mut skipped = 0;
+
+        for item in &import_data {
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if name.is_empty() {
+                skipped += 1;
+                continue;
+            }
+
+            // Skip duplicates
+            if existing_names.contains(&name) {
+                skipped += 1;
+                continue;
+            }
+
+            let provider_type_str = item.get("provider_type").and_then(|v| v.as_str()).unwrap_or("custom");
+            let provider_type = provider_type_str.parse::<ProviderType>().unwrap_or(ProviderType::Custom);
+            let api_key = item.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let base_url = item.get("base_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+            let base_url = if base_url.is_empty() {
+                provider_type.default_base_url().to_string()
+            } else {
+                base_url
+            };
+
+            let mut provider = Provider::new(AppType::ClaudeCode, provider_type, name, api_key, base_url);
+            provider.is_active = item.get("is_active").and_then(|v| v.as_bool()).unwrap_or(false);
+            provider.model = item.get("model").and_then(|v| v.as_str()).map(String::from);
+            provider.priority = item.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            provider.enable_stats = item.get("enable_stats").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if let Some(config) = item.get("config") {
+                provider.config = config.clone();
+            }
+            if let Some(models) = item.get("supported_models") {
+                provider.supported_models = serde_json::from_value(models.clone()).ok();
+            }
+            if let Some(fmt_str) = item.get("api_format").and_then(|v| v.as_str()) {
+                provider.api_format = fmt_str.parse::<ApiFormat>().ok();
+            }
+            if let Some(sync) = item.get("sync_to_cli_tools") {
+                provider.sync_to_cli_tools = serde_json::from_value(sync.clone()).unwrap_or_default();
+            }
+
+            if let Err(e) = ProviderDao::insert(&self.db, &provider) {
+                tracing::warn!("Failed to import provider '{}': {}", provider.name, e);
+                skipped += 1;
+            } else {
+                imported += 1;
+            }
+        }
+
+        self.refresh().await?;
+
+        let msg = if skipped > 0 {
+            format!("Imported {} providers, skipped {} (duplicate/invalid)", imported, skipped)
+        } else {
+            format!("Imported {} providers", imported)
+        };
+        self.show_notification(msg, NotificationLevel::Success);
+        Ok(())
+    }
+
+    /// Provider 导入/导出文件路径
+    fn providers_export_path() -> Result<std::path::PathBuf> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+        Ok(home.join(".mrouter").join("providers.json"))
     }
 
     /// 切换统计时间范围

@@ -5,6 +5,7 @@ pub mod handlers;
 pub mod handler_context;
 pub mod forwarder;
 pub mod response_processor;
+pub mod format_converter;
 pub mod providers;
 pub mod circuit_breaker;
 pub mod failover;

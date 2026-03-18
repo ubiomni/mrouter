@@ -4,13 +4,15 @@ use axum::{
 };
 use chrono::Utc;
 use tokio::time::{Duration, Instant};
-use crate::models::{Provider, TokenUsage};
+use crate::models::{Provider, ApiFormat, TokenUsage};
 use super::cost::CostCalculator;
 use super::error::ProxyError;
+use super::format_converter;
 use super::handler_context::RequestContext;
 use super::request_logger::{RequestLogger, RequestLogBuilder};
 use super::server::ProxyState;
-use super::utils::{extract_token_usage_with_type, extract_token_usage_from_sse_with_type};
+use super::utils::{extract_token_usage_with_type, extract_token_usage_from_sse_with_type,
+                   extract_token_usage_with_format, extract_token_usage_from_sse_with_format};
 
 /// Process a successful upstream response (auto-detects streaming vs non-streaming)
 pub async fn process_response(
@@ -22,6 +24,19 @@ pub async fn process_response(
     let status = response.status();
     let response_headers = response.headers().clone();
 
+    // Determine if format conversion is needed (api_format explicitly set + differs from client)
+    let needs_conversion = provider.needs_format_conversion()
+        && ctx.client_format != provider.effective_api_format();
+    let client_format = ctx.client_format;
+    let provider_format = provider.effective_api_format();
+
+    if needs_conversion {
+        tracing::info!(
+            "[FormatConverter] Response conversion: {} -> {} for provider '{}'",
+            provider_format, client_format, provider.name
+        );
+    }
+
     let is_streaming = response_headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -29,11 +44,13 @@ pub async fn process_response(
         .unwrap_or(false);
 
     if is_streaming {
-        handle_streaming(response, status, response_headers, ctx, provider, state)
-    } else if !provider.enable_stats {
+        handle_streaming(response, status, response_headers, ctx, provider, state,
+                         needs_conversion, client_format, provider_format)
+    } else if !provider.enable_stats && !needs_conversion {
         handle_non_streaming_passthrough(response, status, response_headers)
     } else {
-        handle_non_streaming_buffered(response, status, response_headers, ctx, provider, state).await
+        handle_non_streaming_buffered(response, status, response_headers, ctx, provider, state,
+                                      needs_conversion, client_format, provider_format).await
     }
 }
 
@@ -45,6 +62,9 @@ fn handle_streaming(
     ctx: &RequestContext,
     provider: &Provider,
     state: &ProxyState,
+    needs_conversion: bool,
+    client_format: ApiFormat,
+    provider_format: ApiFormat,
 ) -> Result<Response, ProxyError> {
     tracing::info!("[Proxy] Detected streaming response, forwarding with token extraction");
 
@@ -69,6 +89,11 @@ fn handle_streaming(
     let request_start = ctx.start_time;
     let db_clone = state.db.clone();
     let streaming_timeout = state.config.proxy.streaming_timeout.clone();
+
+    // Clone conversion flags for async block
+    let needs_conversion = needs_conversion;
+    let client_format = client_format;
+    let provider_format = provider_format;
 
     let byte_stream = response.bytes_stream();
 
@@ -135,7 +160,13 @@ fn handle_streaming(
                         parse_sse_events_from_buffer(&mut sse_buffer, &mut collected_events);
                     }
 
-                    yield Ok(bytes);
+                    // Apply SSE format conversion if needed
+                    if needs_conversion {
+                        let converted = convert_sse_chunk(&chunk_str, client_format, provider_format);
+                        yield Ok(bytes::Bytes::from(converted));
+                    } else {
+                        yield Ok(bytes);
+                    }
                 }
                 Ok(Some(Err(e))) => {
                     let err_str = e.to_string();
@@ -186,7 +217,14 @@ fn handle_streaming(
             // Build raw SSE data from collected events for token extraction
             let raw_data = rebuild_sse_data(&collected_events);
 
-            if let Some(usage) = extract_token_usage_from_sse_with_type(&raw_data, &provider_type) {
+            // When format conversion is active, use provider's api_format to select the correct parser
+            // (e.g., provider_type=Custom but api_format=OpenAI → use OpenAI parser)
+            let usage_opt = if needs_conversion {
+                extract_token_usage_from_sse_with_format(&raw_data, provider_format)
+            } else {
+                extract_token_usage_from_sse_with_type(&raw_data, &provider_type)
+            };
+            if let Some(usage) = usage_opt {
                 let cost = CostCalculator::calculate_simple(&usage, &provider_pricing);
                 let duration_ms = request_start.elapsed().as_millis() as i64;
 
@@ -244,7 +282,7 @@ fn handle_non_streaming_passthrough(
     Ok(response)
 }
 
-/// Handle non-streaming response (stats enabled) — buffer and extract tokens
+/// Handle non-streaming response (stats enabled or format conversion needed) — buffer and extract tokens
 async fn handle_non_streaming_buffered(
     response: reqwest::Response,
     status: reqwest::StatusCode,
@@ -252,6 +290,9 @@ async fn handle_non_streaming_buffered(
     ctx: &RequestContext,
     provider: &Provider,
     state: &ProxyState,
+    needs_conversion: bool,
+    client_format: ApiFormat,
+    provider_format: ApiFormat,
 ) -> Result<Response, ProxyError> {
     tracing::info!("[Proxy] Processing non-streaming response (buffered, stats enabled)");
 
@@ -264,8 +305,11 @@ async fn handle_non_streaming_buffered(
     tracing::info!("[Proxy] Response body: {} bytes", body_bytes.len());
     tracing::debug!("[Proxy] <<< Response body:\n{}", String::from_utf8_lossy(&body_bytes));
 
-    // Parse and extract token usage
-    let usage_info = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+    // Parse JSON once and reuse for both token extraction and format conversion
+    let parsed_json = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
+
+    // Extract token usage from parsed JSON
+    let usage_info = if let Some(ref json) = parsed_json {
         tracing::info!("[Proxy] Response body parsed as JSON");
 
         // Check for error in response
@@ -284,20 +328,51 @@ async fn handle_non_streaming_buffered(
             )));
         }
 
-        extract_token_usage_with_type(&json, &provider.provider_type)
+        // When format conversion is active, use provider's api_format to select the correct parser
+        if needs_conversion {
+            extract_token_usage_with_format(json, provider_format)
+        } else {
+            extract_token_usage_with_type(json, &provider.provider_type)
+        }
     } else {
         tracing::info!("[Proxy] Response body is not JSON");
         None
     };
 
+    // Apply format conversion to response body if needed (reuse parsed JSON)
+    let final_body = if needs_conversion {
+        if let Some(json) = parsed_json {
+            let converted = format_converter::convert_response(client_format, provider_format, &json);
+            tracing::info!("[FormatConverter] Non-streaming response converted: {} -> {}", provider_format, client_format);
+            bytes::Bytes::from(serde_json::to_vec(&converted).unwrap_or_else(|_| body_bytes.to_vec()))
+        } else {
+            body_bytes
+        }
+    } else {
+        body_bytes
+    };
+
     let mut response_builder = Response::builder()
         .status(status.as_u16());
     for (key, value) in response_headers.iter() {
+        // Update content-length if body was converted
+        if needs_conversion && key.as_str() == "content-length" {
+            continue;
+        }
+        // Update content-type for Anthropic client expecting Anthropic response
+        if needs_conversion && key.as_str() == "content-type" {
+            continue;
+        }
         response_builder = response_builder.header(key.as_str(), value);
+    }
+    if needs_conversion {
+        response_builder = response_builder
+            .header("content-type", "application/json")
+            .header("content-length", final_body.len().to_string());
     }
 
     let response = response_builder
-        .body(Body::from(body_bytes))
+        .body(Body::from(final_body))
         .map_err(|e| ProxyError::ResponseError(e.to_string()))?;
 
     // Return response with extracted usage for the handler to record
@@ -314,6 +389,34 @@ async fn handle_non_streaming_buffered(
     }
 
     Ok(response)
+}
+
+/// Convert an SSE chunk (may contain multiple events) from provider format to client format
+fn convert_sse_chunk(chunk: &str, client_format: ApiFormat, provider_format: ApiFormat) -> String {
+    let mut result = String::new();
+
+    for line in chunk.split('\n') {
+        if let Some(data) = line.strip_prefix("data: ") {
+            let converted = format_converter::convert_sse_event(client_format, provider_format, data);
+            // convert_sse_event may return multi-line SSE with event: prefixes already
+            if converted.contains("event: ") || converted.contains("data: ") {
+                result.push_str(&converted);
+            } else if !converted.is_empty() {
+                result.push_str("data: ");
+                result.push_str(&converted);
+                result.push('\n');
+            }
+        } else {
+            // Pass through non-data lines (event:, id:, empty lines)
+            // But skip "event:" lines when converting, as convert_sse_event generates its own
+            if !line.starts_with("event:") || client_format == provider_format {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+    }
+
+    result
 }
 
 /// Parse complete SSE events from a buffer, leaving incomplete data in the buffer

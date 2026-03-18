@@ -108,6 +108,11 @@ pub struct ProxyConfig {
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
 
+    /// 上游 HTTP/SOCKS5 代理（如 socks5://127.0.0.1:7890, http://proxy:8080）
+    /// 设为 "none" 禁用系统代理；不设置则跟随系统环境变量
+    #[serde(default)]
+    pub upstream_proxy: Option<String>,
+
     /// 全局自定义请求头（转发到上游时附加，Provider 级别的 custom_headers 优先级更高）
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
@@ -289,6 +294,7 @@ impl Default for ProxyConfig {
             port: default_proxy_port(),
             bind: default_bind_addr(),
             timeout_secs: default_timeout(),
+            upstream_proxy: None,
             headers: std::collections::HashMap::new(),
             streaming_timeout: StreamingTimeoutConfig::default(),
         }
@@ -451,6 +457,15 @@ archive_dir = "~/.mrouter/archives"  # Archive directory for cleaned-up logs
 port = 4444                          # Proxy listen port
 bind = "127.0.0.1"                   # Bind address ("0.0.0.0" to allow external access)
 timeout_secs = 30                    # HTTP connection timeout (seconds)
+
+# Upstream proxy for outbound requests to AI providers
+# - Set a URL to force all requests through that proxy
+# - Set "none" to disable system proxy (ignore http_proxy/https_proxy env vars)
+# - Leave commented to follow system environment variables (default)
+#
+# upstream_proxy = "socks5://127.0.0.1:7890"
+# upstream_proxy = "http://proxy.corp:8080"
+# upstream_proxy = "none"
 
 # Global custom headers (applied to ALL upstream provider requests)
 #

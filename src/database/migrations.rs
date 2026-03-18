@@ -119,6 +119,14 @@ pub fn run_migrations(db: &Database) -> Result<()> {
         )?;
     }
 
+    if current_version < 13 {
+        migration_v13(db)?;
+        db.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (13, datetime('now'))",
+            [],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -375,6 +383,16 @@ fn migration_v12(db: &Database) -> Result<()> {
     // Providers 表添加 api_format 列（用户可覆盖 provider_type 默认的 API 格式）
     db.execute(
         "ALTER TABLE providers ADD COLUMN api_format TEXT",
+        [],
+    )?;
+
+    Ok(())
+}
+
+fn migration_v13(db: &Database) -> Result<()> {
+    // Providers 表添加 enable_format_conversion 列（是否启用协议格式转换）
+    db.execute(
+        "ALTER TABLE providers ADD COLUMN enable_format_conversion INTEGER NOT NULL DEFAULT 0",
         [],
     )?;
 

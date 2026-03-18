@@ -6,6 +6,7 @@ use super::error::ProxyError;
 use super::handler_context::RequestContext;
 use super::server::ProxyState;
 use super::providers::{get_adapter, adapter::AUTH_HEADER_SKIP_SET};
+use super::format_converter;
 
 /// Result of a successful forward operation
 pub struct ForwardResult {
@@ -79,7 +80,7 @@ impl RequestForwarder {
 
                 tracing::info!("Trying provider: {} (priority: {})", provider.name, provider.priority);
 
-                match self.forward_single(provider, path, query, &modified_body, headers, method, state).await {
+                match self.forward_single(provider, path, query, &modified_body, headers, method, state, ctx).await {
                     Ok(response) => {
                         tracing::info!("Request succeeded with provider: {}", provider.name);
                         circuit_breaker.record_success().await;
@@ -105,7 +106,7 @@ impl RequestForwarder {
 
                 tracing::info!("Retrying provider after CB reset: {} (priority: {})", provider.name, provider.priority);
 
-                match self.forward_single(provider, path, query, &modified_body, headers, method, state).await {
+                match self.forward_single(provider, path, query, &modified_body, headers, method, state, ctx).await {
                     Ok(response) => {
                         circuit_breaker.record_success().await;
                         return Ok(ForwardResult {
@@ -140,13 +141,48 @@ impl RequestForwarder {
         headers: &HeaderMap,
         method: &axum::http::Method,
         state: &ProxyState,
+        ctx: &RequestContext,
     ) -> Result<reqwest::Response, ProxyError> {
         let adapter = get_adapter(provider);
         let base_url = adapter.extract_base_url(provider)?;
-        let target_url = adapter.build_url(&base_url, path, query);
 
-        // Apply model mapping
-        let (final_body, final_model) = self.apply_model_mapping(body_bytes, provider)?;
+        // Parse JSON once, apply model mapping + format conversion, serialize once
+        let (final_body, final_model, target_path) = if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
+            // 1. Apply model mapping (JSON → JSON, no serialize)
+            let (mapped_body, original, mapped) = super::model_mapper::apply_model_mapping(body_json, provider);
+            if let (Some(orig), Some(map)) = (&original, &mapped) {
+                tracing::info!("[Proxy] Model mapping: {} -> {}", orig, map);
+            }
+            let final_model = mapped_body.get("model")
+                .and_then(|m| m.as_str())
+                .map(String::from);
+
+            // 2. Apply format conversion if needed (JSON → JSON, no serialize)
+            let needs_conv = provider.needs_format_conversion()
+                && ctx.client_format != provider.effective_api_format();
+            let (result_body, target_path) = if needs_conv {
+                let provider_format = provider.effective_api_format();
+                let (converted, new_path) = format_converter::convert_request(
+                    ctx.client_format, provider_format, &mapped_body, path,
+                );
+                tracing::info!(
+                    "[FormatConverter] Request converted: {} -> {} | path: {} -> {}",
+                    ctx.client_format, provider_format, path, new_path
+                );
+                (converted, new_path)
+            } else {
+                (mapped_body, path.to_string())
+            };
+
+            // 3. Serialize once at the end
+            let body_vec = serde_json::to_vec(&result_body)
+                .map_err(|e| ProxyError::RequestError(format!("Failed to serialize body: {}", e)))?;
+            (bytes::Bytes::from(body_vec), final_model, target_path)
+        } else {
+            (body_bytes.clone(), None, path.to_string())
+        };
+
+        let target_url = adapter.build_url(&base_url, &target_path, query);
 
         tracing::info!(
             "[Proxy] >>> Request to Provider: {} | URL: {} | Model: {}",
@@ -236,32 +272,6 @@ impl RequestForwarder {
         }
 
         Ok(response)
-    }
-
-    /// Apply model mapping to request body
-    fn apply_model_mapping(
-        &self,
-        body_bytes: &bytes::Bytes,
-        provider: &Provider,
-    ) -> Result<(bytes::Bytes, Option<String>), ProxyError> {
-        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
-            let (mapped_body, original, mapped) = super::model_mapper::apply_model_mapping(body_json, provider);
-
-            if let (Some(orig), Some(map)) = (&original, &mapped) {
-                tracing::info!("[Proxy] Model mapping: {} -> {}", orig, map);
-            }
-
-            let final_model = mapped_body.get("model")
-                .and_then(|m| m.as_str())
-                .map(String::from);
-
-            let body_vec = serde_json::to_vec(&mapped_body)
-                .map_err(|e| ProxyError::RequestError(format!("Failed to serialize body: {}", e)))?;
-
-            Ok((bytes::Bytes::from(body_vec), final_model))
-        } else {
-            Ok((body_bytes.clone(), None))
-        }
     }
 
     /// Get or create a circuit breaker for a provider
