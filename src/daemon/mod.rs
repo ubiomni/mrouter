@@ -55,11 +55,13 @@ impl DaemonService {
         // 初始化数据库和配置
         let db = database::init().await?;
         let config = crate::config::AppConfig::load()?;
+
         let proxy_bind = config.proxy.bind.clone();
         let proxy_port = config.proxy.port;
 
         // 启动各个服务：先 bind 所有端口，写 ready 文件，再 serve
         let proxy = ProxyServer::new(db.clone(), proxy_bind.clone(), proxy_port);
+        let _proxy_state = proxy.state();
 
         let (proxy_listener, proxy_app) = proxy.bind().await?;
         tracing::info!("Proxy server bound on {}:{}", proxy_bind, proxy_port);
@@ -119,7 +121,7 @@ impl DaemonService {
         if config.log.stderr {
             tracing::info!("Log stderr: enabled");
         }
-        
+
         // 等待信号
         self.wait_for_signal().await?;
 

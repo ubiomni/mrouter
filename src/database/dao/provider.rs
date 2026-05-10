@@ -27,6 +27,21 @@ impl ProviderDao {
         }
     }
 
+    pub fn get_by_name(db: &Database, name: &str) -> Result<Option<Provider>> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_type, name, is_active, api_key, base_url, model, config, priority, created_at, updated_at, provider_type, sync_to_cli_tools, supported_models, enable_stats, api_format
+             FROM providers WHERE name = ?1"
+        )?;
+
+        let mut rows = stmt.query([name])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_provider(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_all_providers(db: &Database) -> Result<Vec<Provider>> {
         let conn = db.conn.lock().unwrap();
         let mut stmt = conn.prepare(

@@ -30,7 +30,6 @@ impl IntoResponse for ProxyError {
             ProxyError::UpstreamError(msg) => (StatusCode::BAD_GATEWAY, msg),
             ProxyError::ResponseError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
-
         (status, message).into_response()
     }
 }

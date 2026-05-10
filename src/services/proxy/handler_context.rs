@@ -28,10 +28,8 @@ pub struct RequestContext {
     pub client_format: ApiFormat,
     /// Whether this request uses pinned provider routing (X-Provider-Id)
     pub pinned: bool,
-    /// Proxy token ID (when auth_enabled and token validated)
-    pub token_id: Option<i64>,
-    /// Proxy token name
-    pub token_name: Option<String>,
+    /// Unique trace ID for correlating all log entries of a single request
+    pub trace_id: String,
 }
 
 impl RequestContext {
@@ -45,6 +43,12 @@ impl RequestContext {
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
         let request_time = Utc::now();
+
+        // Generate trace_id early so all logs in this function can use it
+        let trace_id = headers.get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("mr-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
 
         // Detect client type and log features
         let client_type = detect_client_type(headers);
@@ -62,7 +66,7 @@ impl RequestContext {
         };
 
         if let Some(ref sid) = session_id {
-            tracing::info!("[Proxy] Session ID: {}", sid);
+            tracing::info!(trace_id = %trace_id, "[Proxy] Session ID: {}", sid);
         }
 
         // --- Provider resolution ---
@@ -76,24 +80,52 @@ impl RequestContext {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok());
 
-        let pinned = pinned_provider_id.is_some();
+        let pinned_provider_name = headers
+            .get("x-provider-name")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let pinned = pinned_provider_id.is_some() || pinned_provider_name.is_some();
 
         let mut providers = if let Some(pid) = pinned_provider_id {
             match ProviderDao::get_by_id(&state.db, pid) {
                 Ok(Some(p)) => {
                     tracing::info!(
+                        trace_id = %trace_id,
                         "[Proxy] Pinned provider routing: id={} name='{}' active={}",
                         pid, p.name, p.is_active
                     );
                     vec![p]
                 }
                 Ok(None) => {
-                    tracing::warn!("[Proxy] Pinned provider id={} not found", pid);
+                    tracing::warn!(trace_id = %trace_id, "[Proxy] Pinned provider id={} not found", pid);
                     return Err(ProxyError::ProviderNotFound(pid));
                 }
                 Err(e) => {
                     return Err(ProxyError::RequestError(
                         format!("Failed to load pinned provider {}: {}", pid, e),
+                    ));
+                }
+            }
+        } else if let Some(ref pname) = pinned_provider_name {
+            match ProviderDao::get_by_name(&state.db, pname) {
+                Ok(Some(p)) => {
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        "[Proxy] Pinned provider routing by name: name='{}' id={} active={}",
+                        pname, p.id, p.is_active
+                    );
+                    vec![p]
+                }
+                Ok(None) => {
+                    tracing::warn!(trace_id = %trace_id, "[Proxy] Pinned provider name='{}' not found", pname);
+                    return Err(ProxyError::RequestError(
+                        format!("Provider with name '{}' not found", pname),
+                    ));
+                }
+                Err(e) => {
+                    return Err(ProxyError::RequestError(
+                        format!("Failed to load pinned provider '{}': {}", pname, e),
                     ));
                 }
             }
@@ -106,7 +138,7 @@ impl RequestContext {
                 .collect::<Vec<_>>();
 
             if all.is_empty() {
-                tracing::warn!("[Proxy] No active providers found");
+                tracing::warn!(trace_id = %trace_id, "[Proxy] No active providers found");
                 return Err(ProxyError::NoProvider);
             }
 
@@ -122,7 +154,7 @@ impl RequestContext {
                 all = matching;
 
                 if !all.is_empty() {
-                    tracing::info!("[Proxy] Model-based routing: model='{}' -> trying {} provider(s)", model, all.len());
+                    tracing::info!(trace_id = %trace_id, "[Proxy] Model-based routing: model='{}' -> trying {} provider(s)", model, all.len());
                 }
             } else {
                 all.sort_by_key(|p| (p.priority, p.id));
@@ -140,7 +172,7 @@ impl RequestContext {
         if let Some(ref original_model) = requested_model {
             let fallback_chain = get_model_fallback_chain(&state.config, original_model, &providers);
             if !fallback_chain.is_empty() {
-                tracing::info!("[ModelFallback] Enabled for model '{}', fallback chain: {:?}", original_model, fallback_chain);
+                tracing::info!(trace_id = %trace_id, "[ModelFallback] Enabled for model '{}', fallback chain: {:?}", original_model, fallback_chain);
                 models_to_try.extend(fallback_chain.into_iter().map(Some));
             }
         }
@@ -159,8 +191,7 @@ impl RequestContext {
             models_to_try,
             client_format,
             pinned,
-            token_id: None,
-            token_name: None,
+            trace_id,
         })
     }
 

@@ -3,7 +3,7 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 use crate::models::{TokenUsage, ProviderType, ApiFormat};
-use super::token_parser::{UniversalParser, ClaudeParser, OpenAIParser, CodexParser, GeminiParser, TokenParser};
+use super::token_parser::{UniversalParser, AnthropicParser, OpenAIParser, CodexParser, GeminiParser, TokenParser};
 
 /// 从响应 JSON 中提取 token 使用信息
 pub fn extract_token_usage(json: &Value) -> Option<TokenUsage> {
@@ -14,7 +14,7 @@ pub fn extract_token_usage(json: &Value) -> Option<TokenUsage> {
 pub fn extract_token_usage_with_type(json: &Value, provider_type: &ProviderType) -> Option<TokenUsage> {
     // 根据 provider 类型选择特定的解析器
     match provider_type {
-        ProviderType::Anthropic => ClaudeParser.parse_response(json),
+        ProviderType::Anthropic => AnthropicParser.parse_response(json),
         ProviderType::OpenAI | ProviderType::OpenRouter | ProviderType::AzureOpenAI => {
             // OpenAI 兼容的 API，也尝试 Codex 解析器
             OpenAIParser.parse_response(json)
@@ -76,7 +76,7 @@ pub fn extract_token_usage_from_sse_with_type(data: &[u8], provider_type: &Provi
 
     // 根据 provider 类型选择特定的解析器
     let usage = match provider_type {
-        ProviderType::Anthropic => ClaudeParser.parse_stream_events(&events),
+        ProviderType::Anthropic => AnthropicParser.parse_stream_events(&events),
         ProviderType::OpenAI | ProviderType::OpenRouter | ProviderType::AzureOpenAI => {
             // OpenAI 兼容的 API，也尝试 Codex 解析器
             OpenAIParser.parse_stream_events(&events)
@@ -111,7 +111,7 @@ pub fn extract_token_usage_from_sse_with_type(data: &[u8], provider_type: &Provi
 /// 用于协议转换场景：provider_type 可能是 Custom，但实际返回的是 OpenAI 格式
 pub fn extract_token_usage_with_format(json: &Value, api_format: ApiFormat) -> Option<TokenUsage> {
     match api_format {
-        ApiFormat::Anthropic => ClaudeParser.parse_response(json),
+        ApiFormat::Anthropic => AnthropicParser.parse_response(json),
         ApiFormat::OpenAI => OpenAIParser.parse_response(json)
             .or_else(|| CodexParser.parse_response(json)),
         ApiFormat::Google => GeminiParser.parse_response(json),
@@ -123,7 +123,7 @@ pub fn extract_token_usage_from_sse_with_format(data: &[u8], api_format: ApiForm
     let events = super::token_parser::extract_sse_events(data);
 
     let usage = match api_format {
-        ApiFormat::Anthropic => ClaudeParser.parse_stream_events(&events),
+        ApiFormat::Anthropic => AnthropicParser.parse_stream_events(&events),
         ApiFormat::OpenAI => OpenAIParser.parse_stream_events(&events)
             .or_else(|| CodexParser.parse_stream_events(&events)),
         ApiFormat::Google => GeminiParser.parse_stream_events(&events),

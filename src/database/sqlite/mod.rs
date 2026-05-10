@@ -21,6 +21,17 @@ impl Database {
         })
     }
 
+    /// Create an in-memory database with all migrations applied (for tests)
+    #[cfg(test)]
+    pub fn new_test() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        migrations::run_migrations(&db)?;
+        Ok(db)
+    }
+
     pub fn execute<P>(&self, sql: &str, params: P) -> Result<usize>
     where
         P: rusqlite::Params,

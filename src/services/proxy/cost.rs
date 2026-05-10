@@ -52,19 +52,19 @@ impl CostCalculator {
 
         // 各项基础成本（不含倍率）
         let input_cost = Decimal::from(billable_input_tokens)
-            * Decimal::from_f64_retain(pricing.input_price_per_million).unwrap_or(dec!(0))
+            * Decimal::try_from(pricing.input_price_per_million).unwrap_or(dec!(0))
             / million;
 
         let output_cost = Decimal::from(usage.output_tokens)
-            * Decimal::from_f64_retain(pricing.output_price_per_million).unwrap_or(dec!(0))
+            * Decimal::try_from(pricing.output_price_per_million).unwrap_or(dec!(0))
             / million;
 
         let cache_read_cost = Decimal::from(usage.cache_read_tokens)
-            * Decimal::from_f64_retain(pricing.cache_read_price_per_million).unwrap_or(dec!(0))
+            * Decimal::try_from(pricing.cache_read_price_per_million).unwrap_or(dec!(0))
             / million;
 
         let cache_creation_cost = Decimal::from(usage.cache_creation_tokens)
-            * Decimal::from_f64_retain(pricing.cache_write_price_per_million).unwrap_or(dec!(0))
+            * Decimal::try_from(pricing.cache_write_price_per_million).unwrap_or(dec!(0))
             / million;
 
         // 总成本 = 各项基础成本之和 × 倍率（确保不为负数）

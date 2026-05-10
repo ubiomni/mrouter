@@ -1504,11 +1504,11 @@ impl App {
 
             // === Streaming Timeout ===
             "streaming.first_byte" => {
-                if let Ok(secs) = value.parse::<u64>() {
-                    if secs >= 1 && secs <= 300 {
+                if let Ok(secs) = value.parse::<i64>() {
+                    if secs == -1 || (secs >= 1 && secs <= 300) {
                         self.config.proxy.streaming_timeout.first_byte_secs = secs;
                     } else {
-                        self.show_notification("First byte timeout must be 1-300 seconds".to_string(), NotificationLevel::Error);
+                        self.show_notification("First byte timeout must be -1 or 1-300 seconds".to_string(), NotificationLevel::Error);
                         return Ok(());
                     }
                 } else {
@@ -1517,11 +1517,11 @@ impl App {
                 }
             }
             "streaming.idle" => {
-                if let Ok(secs) = value.parse::<u64>() {
-                    if secs >= 1 && secs <= 600 {
+                if let Ok(secs) = value.parse::<i64>() {
+                    if secs == -1 || (secs >= 1 && secs <= 600) {
                         self.config.proxy.streaming_timeout.idle_secs = secs;
                     } else {
-                        self.show_notification("Idle timeout must be 1-600 seconds".to_string(), NotificationLevel::Error);
+                        self.show_notification("Idle timeout must be -1 or 1-600 seconds".to_string(), NotificationLevel::Error);
                         return Ok(());
                     }
                 } else {
@@ -1530,11 +1530,11 @@ impl App {
                 }
             }
             "streaming.total" => {
-                if let Ok(secs) = value.parse::<u64>() {
-                    if secs >= 10 && secs <= 3600 {
+                if let Ok(secs) = value.parse::<i64>() {
+                    if secs == -1 || (secs >= 10 && secs <= 3600) {
                         self.config.proxy.streaming_timeout.total_secs = secs;
                     } else {
-                        self.show_notification("Total timeout must be 10-3600 seconds".to_string(), NotificationLevel::Error);
+                        self.show_notification("Total timeout must be -1 or 10-3600 seconds".to_string(), NotificationLevel::Error);
                         return Ok(());
                     }
                 } else {

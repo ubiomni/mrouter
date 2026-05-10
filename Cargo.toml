@@ -10,6 +10,7 @@ license = "MIT"
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
+mysql = ["dep:sqlx"]
 
 [dependencies]
 # TUI 框架
@@ -22,7 +23,10 @@ futures = "0.3"
 
 # 数据库
 rusqlite = { version = "0.31", features = ["bundled", "backup"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "chrono"], optional = true }
 
+# 异步 trait
+async-trait = "0.1"
 
 # HTTP 客户端和服务器
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
@@ -30,8 +34,6 @@ axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 hyper = { version = "1.0", features = ["full"] }
-utoipa = { version = "5", features = ["axum_extras", "chrono"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }
@@ -49,7 +51,6 @@ dirs = "5.0"
 regex = "1.10"
 url = "2.5"
 base64 = "0.22"
-sha2 = "0.10"
 uuid = { version = "1.11", features = ["v4"] }
 shellexpand = "3.1"
 

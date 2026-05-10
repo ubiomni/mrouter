@@ -42,6 +42,18 @@ impl<'a> DatabaseCleaner<'a> {
         Ok(count)
     }
 
+    #[cfg(feature = "mysql")]
+    pub fn get_log_count(&self) -> Result<i64> {
+        let pool = self.db.pool.clone();
+        let count: i64 = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query_scalar("SELECT COUNT(*) FROM proxy_request_logs")
+                    .fetch_one(&pool).await
+            })
+        })?;
+        Ok(count)
+    }
+
     pub fn needs_cleanup(&self, max_logs: i64) -> Result<bool> {
         let count = self.get_log_count()?;
         Ok(count > max_logs)
@@ -140,10 +152,40 @@ impl<'a> DatabaseCleaner<'a> {
         Ok(deleted as i64)
     }
 
+    #[cfg(feature = "mysql")]
+    fn delete_oldest_logs(&self, limit: i64) -> Result<i64> {
+        let pool = self.db.pool.clone();
+        let deleted = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let result = sqlx::query(
+                    "DELETE FROM proxy_request_logs
+                     ORDER BY request_time ASC
+                     LIMIT ?"
+                ).bind(limit).execute(&pool).await?;
+                Ok::<u64, anyhow::Error>(result.rows_affected())
+            })
+        })?;
+        tracing::info!("[Cleanup] Deleted {} old logs", deleted);
+        Ok(deleted as i64)
+    }
+
     #[cfg(feature = "sqlite")]
     fn compact_database(&self) -> Result<()> {
         tracing::info!("[Cleanup] Running VACUUM to reclaim space...");
         self.db.execute("VACUUM", [])?;
+        Ok(())
+    }
+
+    #[cfg(feature = "mysql")]
+    fn compact_database(&self) -> Result<()> {
+        tracing::info!("[Cleanup] Running OPTIMIZE TABLE...");
+        let pool = self.db.pool.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("OPTIMIZE TABLE proxy_request_logs")
+                    .execute(&pool).await
+            })
+        })?;
         Ok(())
     }
 
@@ -155,6 +197,21 @@ impl<'a> DatabaseCleaner<'a> {
             [],
             |row| row.get(0),
         )?;
+        Ok(size)
+    }
+
+    #[cfg(feature = "mysql")]
+    pub fn get_db_size(&self) -> Result<i64> {
+        let pool = self.db.pool.clone();
+        let size: i64 = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COALESCE(SUM(data_length + index_length), 0)
+                     FROM information_schema.TABLES
+                     WHERE table_schema = DATABASE()"
+                ).fetch_one(&pool).await
+            })
+        })?;
         Ok(size)
     }
 }
@@ -184,9 +241,7 @@ mod tests {
 
     #[test]
     fn test_get_log_count() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let db = Database::new(db_path).unwrap();
+        let db = Database::new_test().unwrap();
 
         let cleaner = DatabaseCleaner::new(&db);
         let count = cleaner.get_log_count().unwrap();
@@ -195,9 +250,7 @@ mod tests {
 
     #[test]
     fn test_needs_cleanup() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let db = Database::new(db_path).unwrap();
+        let db = Database::new_test().unwrap();
 
         let cleaner = DatabaseCleaner::new(&db);
         let needs = cleaner.needs_cleanup(1000000).unwrap();

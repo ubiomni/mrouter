@@ -57,7 +57,7 @@ impl UsageStats {
 }
 
 /// 使用统计摘要
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub total_requests: i64,
     pub total_input_tokens: i64,
@@ -68,7 +68,7 @@ pub struct UsageSummary {
     pub by_provider: Vec<ProviderUsage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub provider_name: String,
     pub requests: i64,
@@ -79,7 +79,7 @@ pub struct ProviderUsage {
 }
 
 /// 代理请求日志（详细的每请求跟踪）
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyRequestLog {
     pub id: i64,
     pub provider_id: i64,

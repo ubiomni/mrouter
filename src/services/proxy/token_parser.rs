@@ -14,10 +14,10 @@ pub trait TokenParser {
     fn parse_stream_events(&self, events: &[Value]) -> Option<TokenUsage>;
 }
 
-/// Claude API 解析器
-pub struct ClaudeParser;
+/// Anthropic API 解析器 (parses message_start/message_delta events)
+pub struct AnthropicParser;
 
-impl TokenParser for ClaudeParser {
+impl TokenParser for AnthropicParser {
     fn parse_response(&self, body: &Value) -> Option<TokenUsage> {
         let usage = body.get("usage")?;
 
@@ -293,7 +293,7 @@ impl UniversalParser {
     /// 尝试使用所有已知的解析器
     pub fn parse_response(body: &Value) -> Option<TokenUsage> {
         // 尝试 Claude 格式
-        if let Some(usage) = ClaudeParser.parse_response(body) {
+        if let Some(usage) = AnthropicParser.parse_response(body) {
             tracing::debug!("[TokenParser] Parsed as Claude format");
             return Some(usage);
         }
@@ -317,7 +317,7 @@ impl UniversalParser {
     /// 尝试使用所有已知的流式解析器
     pub fn parse_stream_events(events: &[Value]) -> Option<TokenUsage> {
         // 尝试 Claude 格式
-        if let Some(usage) = ClaudeParser.parse_stream_events(events) {
+        if let Some(usage) = AnthropicParser.parse_stream_events(events) {
             tracing::debug!("[TokenParser] Parsed stream as Claude format");
             return Some(usage);
         }
@@ -379,7 +379,7 @@ mod tests {
             }
         });
 
-        let usage = ClaudeParser.parse_response(&body).unwrap();
+        let usage = AnthropicParser.parse_response(&body).unwrap();
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 20);
@@ -473,7 +473,7 @@ mod tests {
             }),
         ];
 
-        let usage = ClaudeParser.parse_stream_events(&events).unwrap();
+        let usage = AnthropicParser.parse_stream_events(&events).unwrap();
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 20);

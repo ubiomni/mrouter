@@ -9,7 +9,7 @@ pub use provider::*;
 pub use stats::*;
 
 /// CLI 工具类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppType {
     ClaudeCode,
     Codex,

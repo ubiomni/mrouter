@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::AppType;
 
 /// 定价配置
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingConfig {
     /// 每百万输入 tokens 的价格
     pub input_price_per_million: f64,
@@ -18,7 +18,7 @@ pub struct PricingConfig {
 }
 
 /// API 格式（上游 Provider 实际支持的 API 协议）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApiFormat {
     Anthropic,      // /v1/messages (Anthropic Messages API)
     OpenAI,         // /v1/chat/completions (OpenAI Chat Completions)
@@ -49,7 +49,7 @@ impl std::str::FromStr for ApiFormat {
 }
 
 /// API Provider 类型（模型厂商/API 端点）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderType {
     Anthropic,
     OpenAI,
@@ -465,7 +465,7 @@ impl std::str::FromStr for ProviderType {
 }
 
 /// Provider 配置
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub id: i64,
     pub app_type: AppType,
@@ -532,6 +532,17 @@ impl Provider {
     /// 检查是否需要同步到任何 CLI Tool
     pub fn should_sync_to_any(&self) -> bool {
         !self.sync_to_cli_tools.is_empty()
+    }
+
+    /// Return a clone with api_key masked for display
+    pub fn with_masked_key(mut self) -> Self {
+        let key = &self.api_key;
+        self.api_key = if key.len() > 8 {
+            format!("{}...{}", &key[..4], &key[key.len()-4..])
+        } else {
+            "****".to_string()
+        };
+        self
     }
 
     /// 获取有效的 API 格式：有用户指定值用用户值，否则用 provider_type 默认值

@@ -88,11 +88,8 @@ fn anthropic_to_openai_request(body: &Value, _path: &str) -> (Value, String) {
     // Copy stream
     if let Some(stream) = body.get("stream") {
         result.insert("stream".to_string(), stream.clone());
-        // When converting to OpenAI format with streaming, inject stream_options
-        // so that usage info is included in the final chunk for token stats
-        if stream.as_bool() == Some(true) {
-            result.insert("stream_options".to_string(), json!({"include_usage": true}));
-        }
+        // NOTE: stream_options injection is handled by forwarder.rs based on
+        // enable_stats/quota_group conditions. Do NOT inject here unconditionally.
     }
 
     // Copy stop_sequences → stop
@@ -504,10 +501,14 @@ fn convert_anthropic_sse_to_openai(data: &str) -> String {
                 }]
             });
 
-            // Forward usage if present
+            // Forward usage if present — map Anthropic field names to OpenAI
             if let Some(usage) = event.get("usage") {
+                let input = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                let output = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
                 chunk["usage"] = json!({
-                    "completion_tokens": usage.get("output_tokens").cloned().unwrap_or(json!(0)),
+                    "prompt_tokens": input,
+                    "completion_tokens": output,
+                    "total_tokens": input + output,
                 });
             }
 

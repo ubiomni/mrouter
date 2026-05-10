@@ -32,6 +32,17 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
+impl From<&crate::config::CircuitBreakerConfig> for CircuitBreakerConfig {
+    fn from(cfg: &crate::config::CircuitBreakerConfig) -> Self {
+        Self {
+            failure_threshold: cfg.failure_threshold,
+            success_threshold: cfg.success_threshold,
+            timeout: Duration::from_secs(cfg.timeout_secs),
+            half_open_timeout: Duration::from_secs(cfg.half_open_timeout_secs),
+        }
+    }
+}
+
 /// 熔断器
 pub struct CircuitBreaker {
     state: Arc<RwLock<CircuitState>>,

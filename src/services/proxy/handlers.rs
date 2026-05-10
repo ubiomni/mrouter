@@ -1,7 +1,7 @@
 use axum::{
     extract::{Request, State},
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use super::error::ProxyError;
 use super::forwarder::RequestForwarder;
@@ -34,13 +34,15 @@ pub async fn proxy_handler(
         .map_err(|e| ProxyError::RequestError(e.to_string()))?;
 
     // Build request context
-    let mut ctx = RequestContext::new(
+    let ctx = RequestContext::new(
         &state,
         &headers,
         &body_bytes,
         request_path,
         request_method,
     )?;
+
+    tracing::info!(trace_id = %ctx.trace_id, model = ?ctx.request_model, path = %ctx.request_path, "[Proxy] Request started");
 
     // Create forwarder
     let forwarder = RequestForwarder::new(state.http_client.clone());
@@ -57,6 +59,13 @@ pub async fn proxy_handler(
     let axum_response = response_processor::process_response(
         response, &ctx, &provider, &state,
     ).await?;
+
+    // Inject trace_id into response headers
+    let mut axum_response = axum_response;
+    axum_response.headers_mut().insert(
+        "x-trace-id",
+        axum::http::HeaderValue::from_str(&ctx.trace_id).unwrap_or_else(|_| axum::http::HeaderValue::from_static("unknown")),
+    );
 
     Ok(axum_response)
 }

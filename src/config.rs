@@ -73,12 +73,13 @@ pub struct LogConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// 数据库驱动: \"sqlite\"
+    /// 数据库驱动: "sqlite" 或 "mysql"
     #[serde(default = "default_db_driver")]
     pub driver: String,
 
-    /// SQLite: 文件路径
-    /// 默认: "~/.mrouter/db/mrouter.db"
+    /// SQLite: 文件路径; MySQL: 连接 URL
+    /// SQLite default: "~/.mrouter/db/mrouter.db"
+    /// MySQL example: "mysql://user:pass@host:3306/mrouter"
     #[serde(default = "default_db_path")]
     pub path: String,
 
@@ -98,6 +99,9 @@ pub struct DatabaseConfig {
     #[serde(default = "default_true")]
     pub auto_cleanup: bool,
 
+    /// MySQL 连接池最大连接数
+    #[serde(default = "default_pool_max")]
+    pub pool_max_connections: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +118,7 @@ pub struct ProxyConfig {
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
 
+
     /// 上游 HTTP/SOCKS5 代理（如 socks5://127.0.0.1:7890, http://proxy:8080）
     /// 设为 "none" 禁用系统代理；不设置则跟随系统环境变量
     #[serde(default)]
@@ -126,26 +131,33 @@ pub struct ProxyConfig {
     /// 流式响应超时配置
     #[serde(default)]
     pub streaming_timeout: StreamingTimeoutConfig,
+
+    /// 上游生成不完整时返回给客户端的提示文本（thinking_delta 后断流）
+    #[serde(default = "default_incomplete_generation_message")]
+    pub incomplete_generation_message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingTimeoutConfig {
-    /// 首字节超时 (秒) - 等待第一个数据块的最长时间
+    /// 首字节超时 (秒) - 等待第一个数据块的最长时间。-1 表示不超时。
     #[serde(default = "default_first_byte_timeout")]
-    pub first_byte_secs: u64,
+    pub first_byte_secs: i64,
 
-    /// 空闲超时 (秒) - 数据块之间的最长间隔时间
+    /// 空闲超时 (秒) - 数据块之间的最长间隔时间。-1 表示不超时。
     #[serde(default = "default_idle_timeout")]
-    pub idle_secs: u64,
+    pub idle_secs: i64,
 
-    /// 总超时 (秒) - 整个流式响应的最长时间
+    /// 总超时 (秒) - 整个流式响应的最长时间。-1 表示不超时。
     #[serde(default = "default_total_timeout")]
-    pub total_secs: u64,
+    pub total_secs: i64,
 }
 
-fn default_first_byte_timeout() -> u64 { 10 }
-fn default_idle_timeout() -> u64 { 30 }
-fn default_total_timeout() -> u64 { 300 }
+fn default_first_byte_timeout() -> i64 { 10 }
+fn default_idle_timeout() -> i64 { 30 }
+fn default_total_timeout() -> i64 { 300 }
+fn default_incomplete_generation_message() -> String {
+    "The model failed to complete generation.".to_string()
+}
 
 impl Default for StreamingTimeoutConfig {
     fn default() -> Self {
@@ -196,6 +208,7 @@ fn default_log_max_size() -> u64 { 10 } // 10 MB
 fn default_log_max_backups() -> usize { 5 } // 保留 5 个备份
 fn default_db_driver() -> String { "sqlite".to_string() }
 fn default_db_path() -> String { "~/.mrouter/db/mrouter.db".to_string() }
+fn default_pool_max() -> u32 { 10 }
 fn default_proxy_port() -> u16 { 4444 }
 fn default_bind_addr() -> String { "127.0.0.1".to_string() }
 fn default_timeout() -> u64 { 30 }
@@ -292,6 +305,7 @@ impl Default for DatabaseConfig {
             max_request_logs: default_max_request_logs(),
             archive_dir: default_archive_dir(),
             auto_cleanup: true,
+            pool_max_connections: default_pool_max(),
         }
     }
 }
@@ -305,6 +319,7 @@ impl Default for ProxyConfig {
             upstream_proxy: None,
             headers: std::collections::HashMap::new(),
             streaming_timeout: StreamingTimeoutConfig::default(),
+            incomplete_generation_message: default_incomplete_generation_message(),
         }
     }
 }
@@ -365,6 +380,7 @@ impl AppConfig {
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("MROUTER_DB_DRIVER") { self.database.driver = v; }
         if let Ok(v) = std::env::var("MROUTER_DB_URL") { self.database.path = v; }
+        if let Ok(v) = std::env::var("MROUTER_DB_POOL_MAX") { self.database.pool_max_connections = v.parse().unwrap_or(10); }
         if let Ok(v) = std::env::var("MROUTER_PROXY_PORT") { self.proxy.port = v.parse().unwrap_or(4444); }
         if let Ok(v) = std::env::var("MROUTER_PROXY_BIND") { self.proxy.bind = v; }
         if let Ok(v) = std::env::var("MROUTER_LOG_FILE") { self.log.file = Some(v); }
@@ -379,8 +395,12 @@ impl AppConfig {
                 #[cfg(not(feature = "sqlite"))]
                 anyhow::bail!("Config has driver=\"sqlite\" but binary was compiled without the 'sqlite' feature");
             }
+            "mysql" => {
+                #[cfg(not(feature = "mysql"))]
+                anyhow::bail!("Config has driver=\"mysql\" but binary was compiled without the 'mysql' feature");
+            }
             other => {
-                anyhow::bail!("Unknown database driver: '{}'. Supported: sqlite", other);
+                anyhow::bail!("Unknown database driver: '{}'. Supported: sqlite, mysql", other);
             }
         }
         Ok(())
@@ -488,12 +508,13 @@ max_backups = 5                      # Number of rotated log files to keep
 
 # ---- Database ----
 [database]
-driver = "sqlite"                    # Database driver: "sqlite"
-path = "~/.mrouter/db/mrouter.db"   # SQLite file path
-wal_mode = true                      # Enable WAL mode (recommended)
+driver = "sqlite"                    # Database driver: "sqlite" or "mysql"
+path = "~/.mrouter/db/mrouter.db"   # SQLite: file path; MySQL: connection URL (e.g. mysql://user:pass@host:3306/mrouter)
+wal_mode = true                      # Enable WAL mode (SQLite only, recommended)
 auto_cleanup = true                  # Auto-cleanup old request logs on proxy start
 max_request_logs = 1000000           # Max request log entries before cleanup
 archive_dir = "~/.mrouter/archives"  # Archive directory for cleaned-up logs
+pool_max_connections = 10            # MySQL connection pool max size
 
 # ---- Proxy Server ----
 [proxy]
@@ -523,9 +544,9 @@ timeout_secs = 30                    # HTTP connection timeout (seconds)
 
 # Streaming response timeouts
 [proxy.streaming_timeout]
-first_byte_secs = 10                 # Max wait for first data chunk
-idle_secs = 30                       # Max gap between data chunks
-total_secs = 300                     # Max total streaming duration (5 min)
+first_byte_secs = 10                 # Max wait for first data chunk (-1 = no timeout)
+idle_secs = 30                       # Max gap between data chunks (-1 = no timeout)
+total_secs = 300                     # Max total streaming duration (-1 = no timeout)
 
 # ---- Health Check ----
 [health_check]
@@ -559,6 +580,11 @@ enabled = false                      # Enable smart model fallback/degradation
 "gemini-pro" = ["gemini-pro-vision"]
 "gemini-1.5-pro" = ["gemini-1.0-pro"]
 
+# ---- Management API ----
+#
+# REST API for external tools, web UI, and automation.
+# Runs on a separate port, shares state with proxy daemon.
+#
 # ============================================================
 #  Provider-Level Settings (configured via TUI, not this file)
 # ============================================================

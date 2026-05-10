@@ -280,6 +280,13 @@ fn render_providers(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(theme::TEXT),
                 ),
             ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "[I] Import  [E] Export",
+                    Style::default().fg(theme::TEXT),
+                ),
+            ]),
         ];
 
         let detail = Paragraph::new(detail_lines)

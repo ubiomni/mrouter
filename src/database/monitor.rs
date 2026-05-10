@@ -92,6 +92,41 @@ impl<'a> DatabaseMonitor<'a> {
         })
     }
 
+    #[cfg(feature = "mysql")]
+    pub fn get_metrics(&self) -> Result<DbPerformanceMetrics> {
+        let pool = self.db.pool.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let db_size_bytes: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(data_length + index_length), 0)
+                     FROM information_schema.TABLES
+                     WHERE table_schema = DATABASE()"
+                ).fetch_one(&pool).await.unwrap_or(0);
+                let db_size_mb = db_size_bytes as f64 / 1024.0 / 1024.0;
+
+                let total_request_logs: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM proxy_request_logs"
+                ).fetch_one(&pool).await.unwrap_or(0);
+
+                let total_usage_stats: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM usage_stats"
+                ).fetch_one(&pool).await.unwrap_or(0);
+
+                let total_providers: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM providers"
+                ).fetch_one(&pool).await.unwrap_or(0);
+
+                Ok(DbPerformanceMetrics {
+                    db_size_bytes, db_size_mb,
+                    total_request_logs, total_usage_stats, total_providers,
+                    page_count: 0, page_size: 0, cache_size: 0,
+                    wal_mode: false,
+                    synchronous: "N/A (MySQL)".to_string(),
+                })
+            })
+        })
+    }
+
     #[cfg(feature = "sqlite")]
     pub fn benchmark_query(&self, query_name: &str, sql: &str) -> Result<QueryPerformance> {
         let start = std::time::Instant::now();
@@ -102,6 +137,22 @@ impl<'a> DatabaseMonitor<'a> {
 
         let duration_ms = start.elapsed().as_millis() as i64;
 
+        Ok(QueryPerformance { query_name: query_name.to_string(), duration_ms, rows_returned })
+    }
+
+    #[cfg(feature = "mysql")]
+    pub fn benchmark_query(&self, query_name: &str, sql: &str) -> Result<QueryPerformance> {
+        let start = std::time::Instant::now();
+        let pool = self.db.pool.clone();
+        let sql = sql.to_string();
+        let rows_returned: i64 = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rows = sqlx::query(&sql).fetch_all(&pool).await?;
+                Ok::<i64, anyhow::Error>(rows.len() as i64)
+            })
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as i64;
         Ok(QueryPerformance { query_name: query_name.to_string(), duration_ms, rows_returned })
     }
 
@@ -154,6 +205,22 @@ impl<'a> DatabaseMonitor<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "mysql")]
+    pub fn optimize(&self) -> Result<()> {
+        tracing::info!("[Monitor] Running database optimization...");
+        let pool = self.db.pool.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                sqlx::query("ANALYZE TABLE proxy_request_logs").execute(&pool).await?;
+                sqlx::query("ANALYZE TABLE providers").execute(&pool).await?;
+                sqlx::query("OPTIMIZE TABLE proxy_request_logs").execute(&pool).await?;
+                Ok::<(), anyhow::Error>(())
+            })
+        })?;
+        tracing::info!("[Monitor] Optimization completed");
+        Ok(())
+    }
+
     #[cfg(feature = "sqlite")]
     pub fn get_table_sizes(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.db.conn.lock().unwrap();
@@ -175,6 +242,23 @@ impl<'a> DatabaseMonitor<'a> {
         }
         Ok(result)
     }
+
+    #[cfg(feature = "mysql")]
+    pub fn get_table_sizes(&self) -> Result<Vec<(String, i64)>> {
+        let pool = self.db.pool.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rows: Vec<(String, i64)> = sqlx::query_as(
+                    "SELECT table_name, data_length + index_length AS size
+                     FROM information_schema.TABLES
+                     WHERE table_schema = DATABASE()
+                       AND table_name IN ('proxy_request_logs', 'usage_stats', 'providers')
+                     ORDER BY size DESC"
+                ).fetch_all(&pool).await?;
+                Ok(rows)
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -186,14 +270,12 @@ mod tests {
 
     #[test]
     fn test_get_metrics() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let db = Database::new(db_path).unwrap();
+        let db = Database::new_test().unwrap();
 
         let monitor = DatabaseMonitor::new(&db);
         let metrics = monitor.get_metrics().unwrap();
 
-        assert!(metrics.db_size_bytes > 0);
+        // In-memory DB has page_count/page_size but db_size_bytes may be 0
         assert!(metrics.page_count > 0);
         assert!(metrics.page_size > 0);
     }

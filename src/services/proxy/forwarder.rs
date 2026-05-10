@@ -43,7 +43,7 @@ impl RequestForwarder {
         for (model_idx, current_model) in ctx.models_to_try.iter().enumerate() {
             if model_idx > 0 {
                 if let Some(ref model) = current_model {
-                    tracing::info!("[ModelFallback] Trying fallback model: {}", model);
+                    tracing::info!(trace_id = %ctx.trace_id, "[ModelFallback] Trying fallback model: {}", model);
                 }
             }
 
@@ -71,6 +71,7 @@ impl RequestForwarder {
                 if !ctx.pinned && !circuit_breaker.allow_request().await {
                     let cb_state = circuit_breaker.get_state().await;
                     tracing::warn!(
+                        trace_id = %ctx.trace_id,
                         "Provider '{}' skipped due to circuit breaker state: {:?}",
                         provider.name, cb_state
                     );
@@ -78,11 +79,11 @@ impl RequestForwarder {
                 }
                 all_circuit_broken = false;
 
-                tracing::info!("Trying provider: {} (priority: {})", provider.name, provider.priority);
+                tracing::info!(trace_id = %ctx.trace_id, "Trying provider: {} (priority: {})", provider.name, provider.priority);
 
                 match self.forward_single(provider, path, query, &modified_body, headers, method, state, ctx).await {
                     Ok(response) => {
-                        tracing::info!("Request succeeded with provider: {}", provider.name);
+                        tracing::info!(trace_id = %ctx.trace_id, "Request succeeded with provider: {}", provider.name);
                         circuit_breaker.record_success().await;
                         return Ok(ForwardResult {
                             response,
@@ -98,13 +99,13 @@ impl RequestForwarder {
 
             // All providers circuit-broken: reset and retry first
             if all_circuit_broken && !current_providers.is_empty() {
-                tracing::warn!("[Proxy] All providers circuit-broken, resetting circuit breakers and retrying");
+                tracing::warn!(trace_id = %ctx.trace_id, "[Proxy] All providers circuit-broken, resetting circuit breakers and retrying");
                 self.reset_circuit_breakers(state, &current_providers).await;
 
                 let provider = current_providers[0];
                 let circuit_breaker = self.get_or_create_circuit_breaker(state, provider).await;
 
-                tracing::info!("Retrying provider after CB reset: {} (priority: {})", provider.name, provider.priority);
+                tracing::info!(trace_id = %ctx.trace_id, "Retrying provider after CB reset: {} (priority: {})", provider.name, provider.priority);
 
                 match self.forward_single(provider, path, query, &modified_body, headers, method, state, ctx).await {
                     Ok(response) => {
@@ -122,7 +123,7 @@ impl RequestForwarder {
             }
 
             if model_idx < ctx.models_to_try.len() - 1 {
-                tracing::info!("[ModelFallback] All providers failed for current model, trying next fallback model");
+                tracing::info!(trace_id = %ctx.trace_id, "[ModelFallback] All providers failed for current model, trying next fallback model");
             }
         }
 
@@ -151,7 +152,7 @@ impl RequestForwarder {
             // 1. Apply model mapping (JSON → JSON, no serialize)
             let (mapped_body, original, mapped) = super::model_mapper::apply_model_mapping(body_json, provider);
             if let (Some(orig), Some(map)) = (&original, &mapped) {
-                tracing::info!("[Proxy] Model mapping: {} -> {}", orig, map);
+                tracing::info!(trace_id = %ctx.trace_id, "[Proxy] Model mapping: {} -> {}", orig, map);
             }
             let final_model = mapped_body.get("model")
                 .and_then(|m| m.as_str())
@@ -166,6 +167,7 @@ impl RequestForwarder {
                     ctx.client_format, provider_format, &mapped_body, path,
                 );
                 tracing::info!(
+                    trace_id = %ctx.trace_id,
                     "[FormatConverter] Request converted: {} -> {} | path: {} -> {}",
                     ctx.client_format, provider_format, path, new_path
                 );
@@ -175,7 +177,8 @@ impl RequestForwarder {
             };
 
             // 3. Inject stream_options for OpenAI-compatible streaming when stats enabled
-            //    so the upstream returns usage in the final chunk
+            //    so the upstream returns usage in the final chunk (MRouter consumes it internally,
+            //    the usage-only chunk is filtered out before forwarding to downstream clients)
             let is_openai_compatible = matches!(
                 provider.effective_api_format(),
                 crate::models::ApiFormat::OpenAI
@@ -206,6 +209,7 @@ impl RequestForwarder {
         let target_url = adapter.build_url(&base_url, &target_path, query);
 
         tracing::info!(
+            trace_id = %ctx.trace_id,
             "[Proxy] >>> Request to Provider: {} | URL: {} | Model: {}",
             provider.name, target_url,
             final_model.as_deref().unwrap_or("<none>")
@@ -260,8 +264,8 @@ impl RequestForwarder {
             request_builder = adapter.add_auth_headers(request_builder, &auth);
         }
 
-        tracing::info!("[Proxy] >>> {} {} | Body: {} bytes", method, target_url, final_body.len());
-        tracing::debug!("[Proxy] >>> Request body:\n{}", String::from_utf8_lossy(&final_body));
+        tracing::info!(trace_id = %ctx.trace_id, "[Proxy] >>> {} {} | Body: {} bytes", method, target_url, final_body.len());
+        tracing::info!(trace_id = %ctx.trace_id, "[Proxy] >>> Request body:\n{}", String::from_utf8_lossy(&final_body));
 
         // Build request to inspect headers before sending
         let request_obj = request_builder
@@ -270,31 +274,31 @@ impl RequestForwarder {
             .map_err(|e| ProxyError::RequestError(format!("Failed to build request: {}", e)))?;
 
         // Log outgoing headers
-        tracing::debug!("[Proxy] >>> Outgoing headers:");
+        tracing::info!(trace_id = %ctx.trace_id, "[Proxy] >>> Outgoing headers:");
         for (name, value) in request_obj.headers().iter() {
-            tracing::debug!("[Proxy] >>>   {}: {}", name, value.to_str().unwrap_or("<binary>"));
+            tracing::info!(trace_id = %ctx.trace_id, "[Proxy] >>>   {}: {}", name, value.to_str().unwrap_or("<binary>"));
         }
 
         let response = self.http_client.execute(request_obj)
             .await
             .map_err(|e| {
-                tracing::error!("[Proxy] Request failed - Provider: {} | URL: {} | Error: {:?}",
+                tracing::error!(trace_id = %ctx.trace_id, "[Proxy] Request failed - Provider: {} | URL: {} | Error: {:?}",
                     provider.name, target_url, e);
                 self.log_request_error(&e, &final_body, provider);
                 ProxyError::UpstreamError(format!("{:?}", e))
             })?;
 
         let status = response.status();
-        tracing::info!("[Proxy] <<< Response: {} from provider '{}'", status, provider.name);
+        tracing::info!(trace_id = %ctx.trace_id, "[Proxy] <<< Response: {} from provider '{}'", status, provider.name);
 
         if !status.is_success() {
-            tracing::warn!("[Proxy] Non-success status: {} from provider: {}", status, provider.name);
+            tracing::warn!(trace_id = %ctx.trace_id, "[Proxy] Non-success status: {} from provider: {}", status, provider.name);
 
             let error_body = response.bytes().await
                 .map(|b| String::from_utf8_lossy(&b).to_string())
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
 
-            tracing::warn!("[Proxy] Error response body: {}", error_body);
+            tracing::warn!(trace_id = %ctx.trace_id, "[Proxy] Error response body: {}", error_body);
 
             return Err(ProxyError::UpstreamError(format!(
                 "HTTP {} from provider '{}': {}",
@@ -310,8 +314,9 @@ impl RequestForwarder {
         let mut breakers = state.circuit_breakers.write().await;
         breakers.entry(provider.id)
             .or_insert_with(|| {
+                let cb_config = CircuitBreakerConfig::from(&state.config.circuit_breaker);
                 Arc::new(CircuitBreaker::new_with_name(
-                    CircuitBreakerConfig::default(),
+                    cb_config,
                     provider.name.clone(),
                 ))
             })
@@ -393,9 +398,9 @@ impl RequestForwarder {
             tracing::error!("[Proxy] Error type: Decode error");
         }
 
-        tracing::debug!("[Proxy] Request body: {}",
+        tracing::info!("[Proxy] Request body: {}",
             String::from_utf8_lossy(body));
-        tracing::debug!("[Proxy] Provider details: base_url={}, provider_type={:?}",
+        tracing::info!("[Proxy] Provider details: base_url={}, provider_type={:?}",
             provider.base_url, provider.provider_type);
     }
 }

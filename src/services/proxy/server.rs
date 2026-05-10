@@ -85,7 +85,7 @@ impl ProxyServer {
         Self { state, bind, port }
     }
 
-    /// Get a clone of the proxy state (for sharing with management API)
+    /// Get a clone of the proxy state
     pub fn state(&self) -> ProxyState {
         self.state.clone()
     }
@@ -111,11 +111,8 @@ impl ProxyServer {
             self.check_and_cleanup_database().await?;
         }
 
-        let proxy_routes = Router::new()
-            .route("/v1/{*path}", any(proxy_handler));
-
         let app = Router::new()
-            .merge(proxy_routes)
+            .route("/v1/{*path}", any(proxy_handler))
             .route("/health", any(health_handler))
             .route("/status", any(status_handler))
             .with_state(self.state);
