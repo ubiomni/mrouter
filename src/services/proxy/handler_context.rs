@@ -1,0 +1,358 @@
+use std::collections::HashMap;
+use axum::http::HeaderMap;
+use tokio::time::Instant;
+use chrono::Utc;
+use crate::models::{Provider, ApiFormat};
+use super::error::ProxyError;
+use super::relay_mode::RelayMode;
+use super::server::ProxyState;
+use super::utils::extract_session_id;
+use super::model_fallback::get_model_fallback_chain;
+
+/// Request context that carries all information needed throughout the request lifecycle
+pub struct RequestContext {
+    pub start_time: Instant,
+    pub request_time: i64,
+    /// Ordered list of providers to try (first = highest priority)
+    pub providers: Vec<Provider>,
+    /// The model requested by the client (from request body)
+    pub request_model: Option<String>,
+    /// Session ID extracted from headers or body
+    pub session_id: Option<String>,
+    /// Request path (e.g. /v1/messages)
+    pub request_path: String,
+    /// HTTP method
+    pub request_method: String,
+    /// Model fallback chain (original model + degraded alternatives)
+    pub models_to_try: Vec<Option<String>>,
+    /// Client protocol format detected from request path
+    pub client_format: ApiFormat,
+    /// Relay mode: the operation type (ChatCompletions, Embeddings, etc.)
+    pub relay_mode: RelayMode,
+    /// Whether this request uses pinned provider routing (X-Provider-Id)
+    pub pinned: bool,
+    /// Unique trace ID for correlating all log entries of a single request
+    pub trace_id: String,
+    /// Request body size in bytes (for usage estimation fallback)
+    pub request_body_size: usize,
+    // --- Auth fields (populated when API key authentication succeeds) ---
+    /// Authenticated API key ID
+    pub api_key_id: Option<i64>,
+    /// Authenticated API key name
+    pub api_key_name: Option<String>,
+    /// Authenticated user ID
+    pub user_id: Option<i64>,
+    /// Client IP address (from X-Forwarded-For or peer address)
+    pub client_ip: Option<String>,
+    /// Quota group name — when set, quota_rules engine handles quota
+    pub quota_group: Option<String>,
+    /// Organization ID (from authenticated user)
+    pub org_id: Option<i64>,
+    /// Model mappings: provider_id → upstream_model (from provider_models table)
+    pub model_mappings: HashMap<i64, String>,
+}
+
+impl RequestContext {
+    /// Build a RequestContext from the incoming request state.
+    /// `org_id` determines which org's provider pool to load (from auth result).
+    pub async fn new(
+        state: &ProxyState,
+        headers: &HeaderMap,
+        body_bytes: &bytes::Bytes,
+        request_path: String,
+        request_method: String,
+        org_id: i64,
+    ) -> Result<Self, ProxyError> {
+        let start_time = Instant::now();
+        let request_time = Utc::now().timestamp_millis();
+
+        // Generate trace_id early so all logs in this function can use it
+        let trace_id = headers.get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("mr-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+
+        // Detect client type and log features
+        let client_type = detect_client_type(headers);
+        log_client_features(headers, &client_type);
+
+        // Parse model and session_id from body
+        let (requested_model, session_id) = if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
+            let model = body_json.get("model")
+                .and_then(|m| m.as_str())
+                .map(String::from);
+            let session = extract_session_id(headers, &body_json);
+            (model, session)
+        } else {
+            (None, None)
+        };
+
+        if let Some(ref sid) = session_id {
+            tracing::info!(trace_id = %trace_id, "[Proxy] Session ID: {}", sid);
+        }
+
+        // --- Provider resolution ---
+        // Mode 1: Pinned routing via X-Provider-Id header.
+        //   Loads the specific provider by ID, bypasses is_active check and model matching.
+        //   Designed for external orchestrators (e.g. ClawPilot) that manage per-user
+        //   providers and need deterministic routing without polluting the active pool.
+        // Mode 2: Normal pool routing — load all active providers, match by model, sort by priority.
+        let pinned_provider_id = headers
+            .get("x-provider-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok());
+
+        let pinned_provider_name = headers
+            .get("x-provider-name")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let pinned = pinned_provider_id.is_some() || pinned_provider_name.is_some();
+
+        let mut model_mappings: HashMap<i64, String> = HashMap::new();
+
+        let providers = if let Some(pid) = pinned_provider_id {
+            match state.provider_cache.get_by_id(pid).await {
+                Ok(Some(p)) => {
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        "[Proxy] Pinned provider routing: id={} name='{}' status={}",
+                        pid, p.name, p.status
+                    );
+                    vec![p]
+                }
+                Ok(None) => {
+                    tracing::warn!(trace_id = %trace_id, "[Proxy] Pinned provider id={} not found", pid);
+                    return Err(ProxyError::ProviderNotFound(pid));
+                }
+                Err(e) => {
+                    return Err(ProxyError::RequestError(
+                        format!("Failed to load pinned provider {}: {}", pid, e),
+                    ));
+                }
+            }
+        } else if let Some(ref pname) = pinned_provider_name {
+            match state.provider_cache.get_by_name(pname).await {
+                Ok(Some(p)) => {
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        "[Proxy] Pinned provider routing by name: name='{}' id={} status={}",
+                        pname, p.id, p.status
+                    );
+                    vec![p]
+                }
+                Ok(None) => {
+                    tracing::warn!(trace_id = %trace_id, "[Proxy] Pinned provider name='{}' not found", pname);
+                    return Err(ProxyError::RequestError(
+                        format!("Provider with name '{}' not found", pname),
+                    ));
+                }
+                Err(e) => {
+                    return Err(ProxyError::RequestError(
+                        format!("Failed to load pinned provider '{}': {}", pname, e),
+                    ));
+                }
+            }
+        } else {
+            // Normal pool routing — load active providers for the authenticated org
+            let mut all = state.provider_cache.get_all_active(org_id).await
+                .map_err(|e| ProxyError::RequestError(format!("Failed to load providers: {}", e)))?;
+
+            if all.is_empty() {
+                tracing::warn!(trace_id = %trace_id, "[Proxy] No active providers found");
+                return Err(ProxyError::NoProvider);
+            }
+
+            // Model-based filtering: only keep providers that support the requested model
+            if let Some(ref model) = requested_model {
+                // Model-based routing: exclude search providers (they have their own /v1/search route)
+                all.retain(|p| p.category != "search");
+                if all.is_empty() {
+                    tracing::warn!(trace_id = %trace_id, "[Proxy] No active non-search providers found");
+                    return Err(ProxyError::NoProvider);
+                }
+
+                let matched = state.model_router_cache.filter_providers_by_model(all, model);
+                if matched.is_empty() {
+                    tracing::warn!(trace_id = %trace_id, "[ModelRouter] No provider supports model '{}'", model);
+                    return Err(ProxyError::ModelNotFound(model.clone()));
+                }
+
+                // Collect upstream_model mappings and apply model-level priority/weight overrides
+                for m in &matched {
+                    if let Some(ref pm) = m.matched_model {
+                        if let Some(ref upstream) = pm.upstream_model {
+                            if !upstream.is_empty() {
+                                model_mappings.insert(m.provider.id, upstream.clone());
+                            }
+                        }
+                    }
+                }
+
+                all = matched.into_iter().map(|m| {
+                    let mut p = m.provider;
+                    if let Some(ref pm) = m.matched_model {
+                        if pm.priority != 0 { p.priority = pm.priority; }
+                        if pm.weight != 0 { p.weight = pm.weight; }
+                    }
+                    p
+                }).collect();
+
+                tracing::info!(trace_id = %trace_id, "[ModelRouter] Model '{}' -> {} provider(s) matched", model, all.len());
+            }
+
+            all.sort_by_key(|p| (p.priority, p.id));
+            all
+        };
+
+        if providers.is_empty() {
+            return Err(ProxyError::NoProvider);
+        }
+
+        // For pinned providers, also resolve upstream_model mappings
+        if pinned {
+            if let Some(ref model) = requested_model {
+                for p in &providers {
+                    let matched = state.model_router_cache.filter_providers_by_model(vec![p.clone()], model);
+                    for m in &matched {
+                        if let Some(ref pm) = m.matched_model {
+                            if let Some(ref upstream) = pm.upstream_model {
+                                if !upstream.is_empty() {
+                                    tracing::info!(
+                                        trace_id = %trace_id,
+                                        "[ModelRouter] Pinned provider '{}': upstream_model mapping '{}' -> '{}'",
+                                        p.name, model, upstream
+                                    );
+                                    model_mappings.insert(p.id, upstream.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build model fallback chain
+        let mut models_to_try = vec![requested_model.clone()];
+        if let Some(ref original_model) = requested_model {
+            let fallback_chain = get_model_fallback_chain(&state.config, original_model, &providers);
+            if !fallback_chain.is_empty() {
+                tracing::info!(trace_id = %trace_id, "[ModelFallback] Enabled for model '{}', fallback chain: {:?}", original_model, fallback_chain);
+                models_to_try.extend(fallback_chain.into_iter().map(Some));
+            }
+        }
+
+        // Detect client protocol format from request path
+        let client_format = detect_client_format(&request_path);
+        let relay_mode = RelayMode::from_path(&request_path);
+
+        Ok(RequestContext {
+            start_time,
+            request_time,
+            providers,
+            request_model: requested_model,
+            session_id,
+            request_path,
+            request_method,
+            models_to_try,
+            client_format,
+            relay_mode,
+            pinned,
+            trace_id,
+            request_body_size: body_bytes.len(),
+            api_key_id: None,
+            api_key_name: None,
+            user_id: None,
+            client_ip: None,
+            quota_group: None,
+            org_id: Some(org_id),
+            model_mappings,
+        })
+    }
+
+    /// Build modified body bytes for a fallback model
+    pub fn build_fallback_body(&self, body_bytes: &bytes::Bytes, model: &str) -> bytes::Bytes {
+        if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
+            if let Some(obj) = body_json.as_object_mut() {
+                obj.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+                if let Ok(vec) = serde_json::to_vec(&body_json) {
+                    return bytes::Bytes::from(vec);
+                }
+            }
+        }
+        body_bytes.clone()
+    }
+
+    /// Re-sort providers for a specific model (for fallback iteration)
+    pub fn providers_for_model(&self, _model: &Option<String>) -> Vec<&Provider> {
+        let mut sorted: Vec<_> = self.providers.iter().collect();
+        sorted.sort_by_key(|p| (p.priority, p.id));
+        sorted
+    }
+}
+
+/// Detect client type from inbound request headers (returns string label)
+fn detect_client_type(headers: &HeaderMap) -> &'static str {
+    if let Some(ua) = headers.get("user-agent").and_then(|v| v.to_str().ok()) {
+        let ua_lower = ua.to_lowercase();
+        if ua_lower.contains("codex") {
+            return "Codex";
+        } else if ua_lower.contains("gemini") {
+            return "GeminiCli";
+        } else if ua_lower.contains("opencode") {
+            return "OpenCode";
+        } else if ua_lower.contains("openclaw") {
+            return "OpenClaw";
+        } else if ua_lower.contains("claude") {
+            return "ClaudeCode";
+        }
+    }
+
+    if let Some(x_app) = headers.get("x-app").and_then(|v| v.to_str().ok()) {
+        if x_app == "cli" {
+            return "ClaudeCode";
+        }
+    }
+
+    if headers.contains_key("anthropic-version") {
+        return "ClaudeCode";
+    }
+
+    "ClaudeCode"
+}
+
+/// Detect client protocol format from request path
+fn detect_client_format(path: &str) -> ApiFormat {
+    if path.contains("/v1/chat/completions") {
+        ApiFormat::OpenAI
+    } else if path.contains("/v1/responses") {
+        ApiFormat::OpenAIResponses
+    } else if path.contains("/v1/messages") {
+        ApiFormat::Anthropic
+    } else {
+        // Default to Anthropic (most Claude Code clients)
+        ApiFormat::Anthropic
+    }
+}
+
+/// Log client feature headers for debugging
+fn log_client_features(headers: &HeaderMap, client_type: &str) {
+    let feature_keys: &[&str] = &[
+        "user-agent", "x-app", "anthropic-version",
+        "x-stainless-lang", "x-stainless-arch", "x-stainless-os",
+        "x-stainless-runtime", "x-stainless-runtime-version",
+        "openai-beta", "openai-organization",
+        "x-goog-api-client", "x-goog-api-key",
+    ];
+    let mut features = Vec::new();
+    for &key in feature_keys {
+        if let Some(val) = headers.get(key).and_then(|v| v.to_str().ok()) {
+            features.push(format!("{}={}", key, val));
+        }
+    }
+    tracing::info!(
+        "[Proxy] Client detected: {} | features: [{}]",
+        client_type,
+        if features.is_empty() { "<none>".to_string() } else { features.join(", ") }
+    );
+}
